@@ -1,0 +1,12 @@
+{
+  "name": "hostaway-report",
+  "version": "1.0.0",
+  "description": "Daily Hostaway reports via email and WhatsApp",
+  "main": "hostaway-report.js",
+  "scripts": {
+    "start": "node hostaway-report.js"
+  },
+  "keywords": ["hostaway", "automation", "reports"],
+  "author": "",
+  "license": "MIT"
+}
