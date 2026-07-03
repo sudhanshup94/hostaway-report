@@ -5,8 +5,6 @@ const HOSTAWAY_API_KEY = process.env.HOSTAWAY_API_KEY;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const RESEND_SENDER = process.env.RESEND_SENDER;
 const RESEND_RECIPIENT = process.env.RESEND_RECIPIENT;
-const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
-const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const WHATSAPP_RECIPIENT = process.env.WHATSAPP_RECIPIENT;
 
 function httpsRequest(options, data = null) {
@@ -127,26 +125,23 @@ async function sendViaResend(report) {
 }
 
 async function sendViaWhatsApp(report) {
+  const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+
   const response = await httpsRequest(
     {
-      hostname: 'graph.instagram.com',
-      path: `/v18.0/${WHATSAPP_PHONE_ID}/messages`,
+      hostname: 'api.twilio.com',
+      path: `/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Messages.json`,
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-        'Content-Type': 'application/json',
+        'Authorization': `Basic ${auth}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
       },
     },
-    {
-      messaging_product: 'whatsapp',
-      to: WHATSAPP_RECIPIENT,
-      type: 'text',
-      text: { body: report },
-    }
+    `From=whatsapp:${process.env.TWILIO_PHONE_NUMBER}&To=whatsapp:${WHATSAPP_RECIPIENT}&Body=${encodeURIComponent(report)}`
   );
 
-  console.log('WhatsApp sent:', response.status === 200 ? 'Success' : `Failed (${response.status})`);
-  return response.status === 200;
+  console.log('WhatsApp sent:', response.status === 201 ? 'Success' : `Failed (${response.status})`);
+  return response.status === 201;
 }
 
 async function main() {
