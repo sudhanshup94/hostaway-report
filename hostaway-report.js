@@ -144,6 +144,7 @@ async function sendViaWhatsApp(report) {
       res.on('end', () => {
         const success = res.statusCode === 201;
         console.log('WhatsApp sent:', success ? 'Success' : `Failed (${res.statusCode})`);
+        if (!success) console.log('Error details:', data);
         resolve(success);
       });
     });
