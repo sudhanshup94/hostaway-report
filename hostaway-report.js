@@ -125,23 +125,37 @@ async function sendViaResend(report) {
 }
 
 async function sendViaWhatsApp(report) {
-  const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+  return new Promise((resolve) => {
+    const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+    const body = `From=whatsapp:${process.env.TWILIO_PHONE_NUMBER}&To=whatsapp:${WHATSAPP_RECIPIENT}&Body=${encodeURIComponent(report)}`;
 
-  const response = await httpsRequest(
-    {
+    const req = https.request({
       hostname: 'api.twilio.com',
       path: `/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Messages.json`,
       method: 'POST',
       headers: {
         'Authorization': `Basic ${auth}`,
         'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body),
       },
-    },
-    `From=whatsapp:${process.env.TWILIO_PHONE_NUMBER}&To=whatsapp:${WHATSAPP_RECIPIENT}&Body=${encodeURIComponent(report)}`
-  );
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        const success = res.statusCode === 201;
+        console.log('WhatsApp sent:', success ? 'Success' : `Failed (${res.statusCode})`);
+        resolve(success);
+      });
+    });
 
-  console.log('WhatsApp sent:', response.status === 201 ? 'Success' : `Failed (${response.status})`);
-  return response.status === 201;
+    req.on('error', (e) => {
+      console.error('WhatsApp error:', e.message);
+      resolve(false);
+    });
+
+    req.write(body);
+    req.end();
+  });
 }
 
 async function main() {
