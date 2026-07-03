@@ -127,8 +127,9 @@ async function sendViaResend(report) {
 async function sendViaWhatsApp(report) {
   return new Promise((resolve) => {
     const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+    const fromNum = process.env.TWILIO_PHONE_NUMBER.replace(/\D/g, '');
     const recipientNum = WHATSAPP_RECIPIENT.replace(/\D/g, '');
-    const body = `From=whatsapp:${process.env.TWILIO_PHONE_NUMBER}&To=whatsapp:%2B${recipientNum}&Body=${encodeURIComponent(report)}`;
+    const body = `From=whatsapp:%2B${fromNum}&To=whatsapp:%2B${recipientNum}&Body=${encodeURIComponent(report)}`;
 
     const req = https.request({
       hostname: 'api.twilio.com',
