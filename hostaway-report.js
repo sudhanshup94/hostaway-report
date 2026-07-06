@@ -31,16 +31,30 @@ function httpsRequest(options, data = null) {
 
 async function getHostawayData() {
   // Get access token first
-  const tokenRes = await httpsRequest({
-    hostname: 'api.hostaway.com',
-    path: '/v1/accessTokens',
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-  }, {
-    grant_type: 'client_credentials',
-    client_id: parseInt(HOSTAWAY_ACCOUNT_ID),
-    client_secret: HOSTAWAY_API_KEY,
-    scope: 'general',
+  const tokenBody = `grant_type=client_credentials&client_id=${HOSTAWAY_ACCOUNT_ID}&client_secret=${HOSTAWAY_API_KEY}&scope=general`;
+  const tokenRes = await new Promise((resolve) => {
+    const req = https.request({
+      hostname: 'api.hostaway.com',
+      path: '/v1/accessTokens',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(tokenBody),
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve({ status: res.statusCode, body: JSON.parse(data) });
+        } catch (e) {
+          resolve({ status: res.statusCode, body: data });
+        }
+      });
+    });
+    req.on('error', (e) => resolve({ status: 0, body: { error: e.message } }));
+    req.write(tokenBody);
+    req.end();
   });
 
   if (!tokenRes.body?.access_token) {
