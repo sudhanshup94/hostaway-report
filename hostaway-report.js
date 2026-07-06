@@ -96,6 +96,12 @@ async function getHostawayData() {
     headers: { 'Authorization': `Bearer ${token}` },
   });
 
+  // Log sample listing to debug field names
+  if (listings.body?.result && listings.body.result.length > 0) {
+    console.log('Sample listing fields:', Object.keys(listings.body.result[0]));
+    console.log('Sample listing:', JSON.stringify(listings.body.result[0], null, 2));
+  }
+
   // Get calendar data for each listing to detect blocks (next 15 days)
   const listingsArray = listings.body?.result || [];
   const calendarData = {};
