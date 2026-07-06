@@ -259,6 +259,10 @@ function formatReport(data, token, accountId) {
 
   report += `3️⃣ LOW OCCUPANCY ALERTS (NEXT 15 DAYS)\n`;
   report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  report += `Total Properties Analyzed: ${filteredListings.length}\n`;
+  report += `Properties Below Threshold: ${lowOccupancyAlerts.length}\n`;
+  report += `(Villas <30%, Apartments <50%)\n\n`;
+
   if (lowOccupancyAlerts.length > 0) {
     lowOccupancyAlerts.sort((a, b) => parseFloat(a.occupancy) - parseFloat(b.occupancy)).forEach(alert => {
       report += `🚨 ${alert.listing} (${alert.bedrooms}BR ${alert.type})\n`;
