@@ -119,7 +119,7 @@ function calculateOccupancy(reservations, listings, dateStr, calendarData = {}) 
     const hasReservation = reservations.some(r => {
       const arrivalDate = new Date(r.arrivalDate);
       const departureDate = new Date(r.departureDate);
-      return r.listingId === listing.id && arrivalDate <= date && date < departureDate;
+      return r.listingMapId === listing.id && arrivalDate <= date && date < departureDate;
     });
 
     if (hasReservation) {
@@ -171,9 +171,9 @@ function formatReport(data, token, accountId) {
 
   let accommodationFare = 0, cleaningFee = 0, pmCommission = 0;
   todayReservations.forEach(r => {
-    accommodationFare += (r.accommodation || 0);
-    cleaningFee += (r.cleaning || 0);
-    pmCommission += (r.channelCommission || 0);
+    accommodationFare += (r.totalPrice || 0) - (r.cleaningFee || 0) - (r.channelCommissionAmount || 0) - (r.hostawayCommissionAmount || 0);
+    cleaningFee += (r.cleaningFee || 0);
+    pmCommission += (r.channelCommissionAmount || 0) + (r.hostawayCommissionAmount || 0);
   });
 
   report += `2️⃣ REVENUE METRICS FOR TODAY\n`;
@@ -194,7 +194,7 @@ function formatReport(data, token, accountId) {
       const isVilla = listing.type && listing.type.toLowerCase().includes('villa');
       const threshold = isVilla ? 30 : 50;
 
-      const listingReservations = filteredReservations.filter(r => r.listingId === listing.id);
+      const listingReservations = filteredReservations.filter(r => r.listingMapId === listing.id);
       const listingOcc = calculateOccupancy(listingReservations, [listing], checkDateStr, data.calendar);
       if (parseFloat(listingOcc.occupancyPercent) < threshold) {
         lowOccupancyAlerts.push({
