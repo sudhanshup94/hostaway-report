@@ -44,7 +44,8 @@ async function getHostawayData() {
   });
 
   if (!tokenRes.body?.access_token) {
-    throw new Error('Failed to get Hostaway access token');
+    console.log('Token response:', JSON.stringify(tokenRes, null, 2));
+    throw new Error(`Failed to get Hostaway access token: ${JSON.stringify(tokenRes.body)}`);
   }
 
   const token = tokenRes.body.access_token;
