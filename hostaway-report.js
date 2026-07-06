@@ -101,11 +101,28 @@ async function getHostawayData() {
     calendarData[listing.id] = cal.body?.result || [];
   }
 
+  // Fetch PM Commission for each reservation from finance calculated fields
+  const reservationsArray = reservations.body?.result || [];
+  const pmCommissions = {};
+
+  for (const reservation of reservationsArray) {
+    const financeRes = await httpsRequest({
+      hostname: 'api.hostaway.com',
+      path: `/v1/financeCalculatedField/reservation/${reservation.id}?accountId=${HOSTAWAY_ACCOUNT_ID}`,
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+
+    const pmData = financeRes.body?.result?.find(f => f.formulaName === 'propertyManagerCommission');
+    pmCommissions[reservation.id] = pmData?.formulaResult || 0;
+  }
+
   return {
     token,
-    reservations: reservations.body?.result || [],
+    reservations: reservationsArray,
     listings: listingsArray,
     calendar: calendarData,
+    pmCommissions,
   };
 }
 
@@ -171,9 +188,10 @@ function formatReport(data, token, accountId) {
 
   let accommodationFare = 0, cleaningFee = 0, pmCommission = 0;
   todayReservations.forEach(r => {
-    accommodationFare += (r.totalPrice || 0) - (r.cleaningFee || 0) - (r.channelCommissionAmount || 0) - (r.hostawayCommissionAmount || 0);
+    const pmComm = data.pmCommissions[r.id] || 0;
+    accommodationFare += (r.totalPrice || 0) - (r.cleaningFee || 0) - pmComm;
     cleaningFee += (r.cleaningFee || 0);
-    pmCommission += (r.channelCommissionAmount || 0) + (r.hostawayCommissionAmount || 0);
+    pmCommission += pmComm;
   });
 
   report += `2️⃣ REVENUE METRICS FOR TODAY\n`;
