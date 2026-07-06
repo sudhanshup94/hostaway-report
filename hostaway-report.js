@@ -105,7 +105,7 @@ async function getHostawayData() {
   const reservationsArray = reservations.body?.result || [];
   const pmCommissions = {};
 
-  for (const reservation of reservationsArray.slice(0, 3)) {
+  for (const reservation of reservationsArray) {
     const financeRes = await httpsRequest({
       hostname: 'api.hostaway.com',
       path: `/v1/financeCalculatedField/reservation/${reservation.id}?accountId=${HOSTAWAY_ACCOUNT_ID}`,
@@ -113,13 +113,8 @@ async function getHostawayData() {
       headers: { 'Authorization': `Bearer ${token}` },
     });
 
-    console.log(`Finance data for reservation ${reservation.id}:`, JSON.stringify(financeRes.body, null, 2));
-    const pmData = financeRes.body?.result?.find(f => f.formulaName === 'propertyManagerCommission');
+    const pmData = financeRes.body?.result?.find(f => f.formulaName === 'pmCommission');
     pmCommissions[reservation.id] = pmData?.formulaResult || 0;
-  }
-
-  for (const reservation of reservationsArray.slice(3)) {
-    pmCommissions[reservation.id] = 0;
   }
 
   return {
