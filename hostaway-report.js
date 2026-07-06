@@ -104,10 +104,7 @@ async function getHostawayData() {
   endDate.setDate(endDate.getDate() + 15);
   const endDateStr = endDate.toISOString().split('T')[0];
 
-  console.log(`\n📅 DEBUGGING: Fetching calendar data for ${listingsArray.length} listings`);
-  console.log(`Date range: ${today} to ${endDateStr}`);
-
-  for (const listing of listingsArray.slice(0, 2)) {
+  for (const listing of listingsArray) {
     if (EXCLUDED_LISTINGS.includes(listing.id)) continue;
 
     const cal = await httpsRequest({
@@ -117,19 +114,7 @@ async function getHostawayData() {
       headers: { 'Authorization': `Bearer ${token}` },
     });
 
-    console.log(`\nListing ${listing.id} (${listing.internalListingName}):`);
-    console.log(`Calendar response status: ${cal.status}`);
-    console.log(`Calendar data count: ${cal.body?.result?.length || 0}`);
-    if (cal.body?.result && cal.body.result.length > 0) {
-      console.log(`Sample calendar entry:`, JSON.stringify(cal.body.result[0], null, 2));
-    }
-
     calendarData[listing.id] = cal.body?.result || [];
-  }
-
-  // Fill rest with empty
-  for (const listing of listingsArray.slice(2)) {
-    calendarData[listing.id] = [];
   }
 
   // Fetch PM Commission for each reservation from finance calculated fields
@@ -158,27 +143,23 @@ async function getHostawayData() {
 }
 
 function calculateOccupancy(reservations, listings, dateStr, calendarData = {}) {
-  const date = new Date(dateStr);
   let occupied = 0;
   let unavailable = 0;
   const total = listings.length;
 
   listings.forEach(listing => {
-    const hasReservation = reservations.some(r => {
-      const arrivalDate = new Date(r.arrivalDate);
-      const departureDate = new Date(r.departureDate);
-      return r.listingMapId === listing.id && arrivalDate <= date && date < departureDate;
-    });
+    const listingCal = calendarData[listing.id] || [];
+    const dayEntry = listingCal.find(c => c.date === dateStr);
 
-    if (hasReservation) {
-      occupied++;
-    } else {
-      // Check if listing is blocked on this date
-      const listingCal = calendarData[listing.id] || [];
-      const dayEntry = listingCal.find(c => c.day === dateStr);
-      if (dayEntry && (dayEntry.status === 'blocked' || dayEntry.blocked === true)) {
+    if (dayEntry) {
+      // Use calendar status: reserved means occupied, blocked means unavailable
+      if (dayEntry.status === 'reserved' && dayEntry.countReservedUnits > 0) {
+        occupied++;
+      } else if (dayEntry.status === 'blocked' || dayEntry.countBlockedUnits > 0) {
         unavailable++;
       }
+    } else {
+      // No calendar entry means available/empty
     }
   });
 
