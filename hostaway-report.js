@@ -30,6 +30,24 @@ function httpsRequest(options, data = null) {
 }
 
 async function getHostawayData() {
+  // Get access token first
+  const tokenRes = await httpsRequest({
+    hostname: 'api.hostaway.com',
+    path: '/v1/accessTokens',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  }, {
+    grant_type: 'client_credentials',
+    client_id: parseInt(HOSTAWAY_ACCOUNT_ID),
+    client_secret: HOSTAWAY_API_KEY,
+    scope: 'general',
+  });
+
+  if (!tokenRes.body?.access_token) {
+    throw new Error('Failed to get Hostaway access token');
+  }
+
+  const token = tokenRes.body.access_token;
   const today = new Date().toISOString().split('T')[0];
 
   // Get reservations
@@ -37,7 +55,7 @@ async function getHostawayData() {
     hostname: 'api.hostaway.com',
     path: `/v1/reservations?accountId=${HOSTAWAY_ACCOUNT_ID}&status=active,confirmed`,
     method: 'GET',
-    headers: { 'Authorization': `Bearer ${HOSTAWAY_API_KEY}` },
+    headers: { 'Authorization': `Bearer ${token}` },
   });
 
   // Get messages
@@ -45,7 +63,7 @@ async function getHostawayData() {
     hostname: 'api.hostaway.com',
     path: `/v1/messages?accountId=${HOSTAWAY_ACCOUNT_ID}&unread=true`,
     method: 'GET',
-    headers: { 'Authorization': `Bearer ${HOSTAWAY_API_KEY}` },
+    headers: { 'Authorization': `Bearer ${token}` },
   });
 
   // Get listings for occupancy
@@ -53,7 +71,7 @@ async function getHostawayData() {
     hostname: 'api.hostaway.com',
     path: `/v1/listings?accountId=${HOSTAWAY_ACCOUNT_ID}`,
     method: 'GET',
-    headers: { 'Authorization': `Bearer ${HOSTAWAY_API_KEY}` },
+    headers: { 'Authorization': `Bearer ${token}` },
   });
 
   return {
