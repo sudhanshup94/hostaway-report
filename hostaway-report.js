@@ -203,37 +203,51 @@ function formatReport(data, token, accountId) {
 
   // 3. LOW OCCUPANCY ALERTS (NEXT 15 DAYS)
   const lowOccupancyAlerts = [];
-  for (let i = 0; i < 15; i++) {
-    const checkDate = new Date(today);
-    checkDate.setDate(checkDate.getDate() + i);
-    const checkDateStr = checkDate.toISOString().split('T')[0];
+  const listingOccupancyMap = {};
 
-    filteredListings.forEach(listing => {
-      const isVilla = listing.type && listing.type.toLowerCase().includes('villa');
-      const threshold = isVilla ? 30 : 50;
+  // Calculate occupancy for each listing over the next 15 days
+  filteredListings.forEach(listing => {
+    const isVilla = listing.type && listing.type.toLowerCase().includes('villa');
+    const threshold = isVilla ? 30 : 50;
+    let minOccupancy = 100;
+    let minOccupancyDate = null;
+
+    // Check all 15 days
+    for (let i = 0; i < 15; i++) {
+      const checkDate = new Date(today);
+      checkDate.setDate(checkDate.getDate() + i);
+      const checkDateStr = checkDate.toISOString().split('T')[0];
 
       const listingReservations = filteredReservations.filter(r => r.listingMapId === listing.id);
       const listingOcc = calculateOccupancy(listingReservations, [listing], checkDateStr, data.calendar);
-      if (parseFloat(listingOcc.occupancyPercent) < threshold) {
-        lowOccupancyAlerts.push({
-          date: checkDate.toLocaleDateString('en-IN'),
-          listing: listing.name || `Listing ${listing.id}`,
-          type: isVilla ? 'Villa' : 'Apartment',
-          occupancy: listingOcc.occupancyPercent,
-        });
+      const occupancyPercent = parseFloat(listingOcc.occupancyPercent);
+
+      if (occupancyPercent < minOccupancy) {
+        minOccupancy = occupancyPercent;
+        minOccupancyDate = checkDate.toLocaleDateString('en-IN');
       }
-    });
-  }
+    }
+
+    // If minimum occupancy is below threshold, add alert once
+    if (minOccupancy < threshold) {
+      lowOccupancyAlerts.push({
+        listing: listing.name || `Listing ${listing.id}`,
+        type: isVilla ? 'Villa' : 'Apartment',
+        minOccupancyDate: minOccupancyDate,
+        occupancy: minOccupancy.toFixed(1),
+      });
+    }
+  });
 
   report += `3️⃣ LOW OCCUPANCY ALERTS (NEXT 15 DAYS)\n`;
   report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
   if (lowOccupancyAlerts.length > 0) {
-    lowOccupancyAlerts.slice(0, 10).forEach(alert => {
+    lowOccupancyAlerts.sort((a, b) => parseFloat(a.occupancy) - parseFloat(b.occupancy)).slice(0, 20).forEach(alert => {
       report += `🚨 ${alert.listing} (${alert.type})\n`;
-      report += `   Date: ${alert.date} | Occupancy: ${alert.occupancy}%\n`;
+      report += `   Min Occupancy: ${alert.occupancy}% on ${alert.minOccupancyDate}\n`;
     });
-    if (lowOccupancyAlerts.length > 10) {
-      report += `... and ${lowOccupancyAlerts.length - 10} more\n`;
+    if (lowOccupancyAlerts.length > 20) {
+      report += `... and ${lowOccupancyAlerts.length - 20} more\n`;
     }
   } else {
     report += `✅ All properties have good occupancy!\n`;
