@@ -117,6 +117,14 @@ async function getHostawayData() {
     calendarData[listing.id] = cal.body?.result || [];
   }
 
+  // Debug: check a sample listing's calendar data
+  const firstListing = listingsArray[0];
+  if (firstListing && calendarData[firstListing.id]) {
+    const todayEntry = calendarData[firstListing.id].find(c => c.date === today);
+    console.log(`\n🔍 DEBUG: First listing ${firstListing.id} (${firstListing.internalListingName})`);
+    console.log(`   Calendar for ${today}:`, todayEntry ? `status=${todayEntry.status}, countReserved=${todayEntry.countReservedUnits}` : 'NO ENTRY');
+  }
+
   // Fetch PM Commission for each reservation from finance calculated fields
   const reservationsArray = reservations.body?.result || [];
   const pmCommissions = {};
