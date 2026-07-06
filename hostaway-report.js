@@ -8,6 +8,21 @@ const RESEND_RECIPIENT = process.env.RESEND_RECIPIENT;
 const WHATSAPP_RECIPIENT = process.env.WHATSAPP_RECIPIENT;
 const EXCLUDED_LISTINGS = [488785];
 
+function parseListingType(listingName) {
+  if (!listingName) return { type: 'Unknown', bedrooms: 0 };
+
+  const firstSegment = listingName.split('-')[0];
+  const isVilla = firstSegment.endsWith('BV');
+  const isApartment = firstSegment.endsWith('BA');
+
+  const bedrooms = parseFloat(firstSegment.replace(/BA$|BV$/, '')) || 0;
+
+  return {
+    type: isVilla ? 'Villa' : isApartment ? 'Apartment' : 'Unknown',
+    bedrooms,
+  };
+}
+
 function httpsRequest(options, data = null) {
   return new Promise((resolve, reject) => {
     const req = https.request(options, (res) => {
@@ -207,7 +222,8 @@ function formatReport(data, token, accountId) {
 
   // Calculate occupancy for each listing over the next 15 days
   filteredListings.forEach(listing => {
-    const isVilla = listing.type && listing.type.toLowerCase().includes('villa');
+    const listingInfo = parseListingType(listing.name);
+    const isVilla = listingInfo.type === 'Villa';
     const threshold = isVilla ? 30 : 50;
     let minOccupancy = 100;
     let minOccupancyDate = null;
@@ -232,7 +248,8 @@ function formatReport(data, token, accountId) {
     if (minOccupancy < threshold) {
       lowOccupancyAlerts.push({
         listing: listing.name || `Listing ${listing.id}`,
-        type: isVilla ? 'Villa' : 'Apartment',
+        type: listingInfo.type,
+        bedrooms: listingInfo.bedrooms,
         minOccupancyDate: minOccupancyDate,
         occupancy: minOccupancy.toFixed(1),
       });
@@ -243,7 +260,7 @@ function formatReport(data, token, accountId) {
   report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
   if (lowOccupancyAlerts.length > 0) {
     lowOccupancyAlerts.sort((a, b) => parseFloat(a.occupancy) - parseFloat(b.occupancy)).slice(0, 20).forEach(alert => {
-      report += `🚨 ${alert.listing} (${alert.type})\n`;
+      report += `🚨 ${alert.listing} (${alert.bedrooms}BR ${alert.type})\n`;
       report += `   Min Occupancy: ${alert.occupancy}% on ${alert.minOccupancyDate}\n`;
     });
     if (lowOccupancyAlerts.length > 20) {
