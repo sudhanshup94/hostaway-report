@@ -288,8 +288,13 @@ async function main() {
     console.log('Fetching Hostaway data...');
     const data = await getHostawayData();
 
+    if (data.reservations.length > 0) {
+      console.log('\n📋 SAMPLE RESERVATION (for debugging):');
+      console.log(JSON.stringify(data.reservations[0], null, 2));
+    }
+
     const report = formatReport(data, data.token, HOSTAWAY_ACCOUNT_ID);
-    console.log('Report:\n', report);
+    console.log('\nReport:\n', report);
 
     console.log('\nSending via Resend...');
     await sendViaResend(report);
