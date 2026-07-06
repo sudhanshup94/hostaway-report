@@ -248,7 +248,7 @@ function formatReport(data, token, accountId) {
     // If minimum occupancy is below threshold, add alert once
     if (minOccupancy < threshold) {
       lowOccupancyAlerts.push({
-        listing: listing.name || `Listing ${listing.id}`,
+        listing: listing.internalListingName || listing.name || `Listing ${listing.id}`,
         type: listingInfo.type,
         bedrooms: listingInfo.bedrooms,
         minOccupancyDate: minOccupancyDate,
@@ -260,13 +260,10 @@ function formatReport(data, token, accountId) {
   report += `3️⃣ LOW OCCUPANCY ALERTS (NEXT 15 DAYS)\n`;
   report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
   if (lowOccupancyAlerts.length > 0) {
-    lowOccupancyAlerts.sort((a, b) => parseFloat(a.occupancy) - parseFloat(b.occupancy)).slice(0, 20).forEach(alert => {
+    lowOccupancyAlerts.sort((a, b) => parseFloat(a.occupancy) - parseFloat(b.occupancy)).forEach(alert => {
       report += `🚨 ${alert.listing} (${alert.bedrooms}BR ${alert.type})\n`;
       report += `   Min Occupancy: ${alert.occupancy}% on ${alert.minOccupancyDate}\n`;
     });
-    if (lowOccupancyAlerts.length > 20) {
-      report += `... and ${lowOccupancyAlerts.length - 20} more\n`;
-    }
   } else {
     report += `✅ All properties have good occupancy!\n`;
   }
