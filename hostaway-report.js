@@ -104,7 +104,10 @@ async function getHostawayData() {
   endDate.setDate(endDate.getDate() + 15);
   const endDateStr = endDate.toISOString().split('T')[0];
 
-  for (const listing of listingsArray) {
+  console.log(`\n📅 DEBUGGING: Fetching calendar data for ${listingsArray.length} listings`);
+  console.log(`Date range: ${today} to ${endDateStr}`);
+
+  for (const listing of listingsArray.slice(0, 2)) {
     if (EXCLUDED_LISTINGS.includes(listing.id)) continue;
 
     const cal = await httpsRequest({
@@ -114,7 +117,19 @@ async function getHostawayData() {
       headers: { 'Authorization': `Bearer ${token}` },
     });
 
+    console.log(`\nListing ${listing.id} (${listing.internalListingName}):`);
+    console.log(`Calendar response status: ${cal.status}`);
+    console.log(`Calendar data count: ${cal.body?.result?.length || 0}`);
+    if (cal.body?.result && cal.body.result.length > 0) {
+      console.log(`Sample calendar entry:`, JSON.stringify(cal.body.result[0], null, 2));
+    }
+
     calendarData[listing.id] = cal.body?.result || [];
+  }
+
+  // Fill rest with empty
+  for (const listing of listingsArray.slice(2)) {
+    calendarData[listing.id] = [];
   }
 
   // Fetch PM Commission for each reservation from finance calculated fields
