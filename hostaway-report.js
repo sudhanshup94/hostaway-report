@@ -96,11 +96,6 @@ async function getHostawayData() {
     headers: { 'Authorization': `Bearer ${token}` },
   });
 
-  // Log sample listing to debug field names
-  if (listings.body?.result && listings.body.result.length > 0) {
-    console.log('Sample listing fields:', Object.keys(listings.body.result[0]));
-    console.log('Sample listing:', JSON.stringify(listings.body.result[0], null, 2));
-  }
 
   // Get calendar data for each listing to detect blocks (next 15 days)
   const listingsArray = listings.body?.result || [];
@@ -228,7 +223,7 @@ function formatReport(data, token, accountId) {
 
   // Calculate occupancy for each listing over the next 15 days
   filteredListings.forEach(listing => {
-    const listingInfo = parseListingType(listing.name);
+    const listingInfo = parseListingType(listing.internalListingName);
     const isVilla = listingInfo.type === 'Villa';
     const threshold = isVilla ? 30 : 50;
     let minOccupancy = 100;
