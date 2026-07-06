@@ -2,7 +2,7 @@ name: Hostaway Daily Report
 
 on:
   schedule:
-    - cron: '30 5 * * *'  # 5:30 UTC = 11:00 AM IST
+    - cron: '30 12 * * *'  # 12:30 UTC = 6:00 PM IST
   workflow_dispatch:  # Allows manual trigger
 
 jobs:

@@ -6,6 +6,7 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const RESEND_SENDER = process.env.RESEND_SENDER;
 const RESEND_RECIPIENT = process.env.RESEND_RECIPIENT;
 const WHATSAPP_RECIPIENT = process.env.WHATSAPP_RECIPIENT;
+const EXCLUDED_LISTINGS = [488785];
 
 function httpsRequest(options, data = null) {
   return new Promise((resolve, reject) => {
@@ -58,7 +59,6 @@ async function getHostawayData() {
   });
 
   if (!tokenRes.body?.access_token) {
-    console.log('Token response:', JSON.stringify(tokenRes, null, 2));
     throw new Error(`Failed to get Hostaway access token: ${JSON.stringify(tokenRes.body)}`);
   }
 
@@ -73,15 +73,7 @@ async function getHostawayData() {
     headers: { 'Authorization': `Bearer ${token}` },
   });
 
-  // Get messages
-  const messages = await httpsRequest({
-    hostname: 'api.hostaway.com',
-    path: `/v1/messages?accountId=${HOSTAWAY_ACCOUNT_ID}&unread=true`,
-    method: 'GET',
-    headers: { 'Authorization': `Bearer ${token}` },
-  });
-
-  // Get listings for occupancy
+  // Get listings
   const listings = await httpsRequest({
     hostname: 'api.hostaway.com',
     path: `/v1/listings?accountId=${HOSTAWAY_ACCOUNT_ID}`,
@@ -90,46 +82,116 @@ async function getHostawayData() {
   });
 
   return {
+    token,
     reservations: reservations.body?.result || [],
-    messages: messages.body?.result || [],
     listings: listings.body?.result || [],
   };
 }
 
-function formatReport(data) {
-  const today = new Date().toLocaleDateString('en-IN');
+function calculateOccupancy(reservations, listings, dateStr) {
+  const date = new Date(dateStr);
+  let occupied = 0;
+  let unavailable = 0;
+  const total = listings.length;
 
-  let report = `📊 Hostaway Daily Report - ${today}\n\n`;
+  reservations.forEach(r => {
+    const arrivalDate = new Date(r.arrivalDate);
+    const departureDate = new Date(r.departureDate);
+    if (arrivalDate <= date && date < departureDate) {
+      occupied++;
+    }
+  });
 
-  // Revenue summary
-  const totalRevenue = data.reservations
-    .reduce((sum, r) => sum + (r.totalPrice || 0), 0)
-    .toFixed(2);
-  report += `💰 Revenue: ₹${totalRevenue}\n`;
+  unavailable = total - occupied;
+  const availableUnits = total - unavailable;
+  const occupancyPercent = availableUnits > 0 ? ((occupied / availableUnits) * 100).toFixed(1) : 0;
 
-  // Reservations
-  report += `\n🏠 Reservations:\n`;
-  if (data.reservations.length > 0) {
-    data.reservations.slice(0, 5).forEach((r, i) => {
-      report += `${i + 1}. Guest: ${r.guestName || 'Unknown'} | Check-in: ${r.arrivalDate} | Price: ₹${r.totalPrice}\n`;
+  return { total, occupied, unavailable, occupancyPercent };
+}
+
+function formatReport(data, token, accountId) {
+  const today = new Date();
+  const todayStr = today.toISOString().split('T')[0];
+  const dateDisplay = today.toLocaleDateString('en-IN');
+
+  // Filter out excluded listings
+  const filteredListings = data.listings.filter(l => !EXCLUDED_LISTINGS.includes(l.id));
+  const filteredReservations = data.reservations.filter(r => !EXCLUDED_LISTINGS.includes(r.listingId));
+
+  let report = `📊 DAILY REPORTS\n`;
+  report += `Date: ${dateDisplay}\n`;
+  report += `Delivery time: 6:00 PM every day\n\n`;
+
+  // 1. OCCUPANCY FOR TODAY
+  const occupancy = calculateOccupancy(filteredReservations, filteredListings, todayStr);
+  report += `1️⃣ OCCUPANCY FOR TODAY\n`;
+  report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  report += `Total Units: ${occupancy.total}\n`;
+  report += `Occupied Units: ${occupancy.occupied}\n`;
+  report += `Unavailable Units: ${occupancy.unavailable}\n`;
+  report += `Occupancy %: ${occupancy.occupancyPercent}%\n\n`;
+
+  // 2. REVENUE METRICS
+  const todayReservations = filteredReservations.filter(r => {
+    const arrivalDate = new Date(r.arrivalDate);
+    const departureDate = new Date(r.departureDate);
+    return arrivalDate <= today && today < departureDate;
+  });
+
+  let accommodationFare = 0, cleaningFee = 0, pmCommission = 0;
+  todayReservations.forEach(r => {
+    accommodationFare += (r.accommodation || 0);
+    cleaningFee += (r.cleaning || 0);
+    pmCommission += (r.channelCommission || 0);
+  });
+
+  report += `2️⃣ REVENUE METRICS FOR TODAY\n`;
+  report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  report += `Accommodation Fare: ₹${accommodationFare.toFixed(2)}\n`;
+  report += `PM Commission: ₹${pmCommission.toFixed(2)}\n`;
+  report += `Cleaning Fee: ₹${cleaningFee.toFixed(2)}\n`;
+  report += `Total: ₹${(accommodationFare + pmCommission + cleaningFee).toFixed(2)}\n\n`;
+
+  // 3. LOW OCCUPANCY ALERTS (NEXT 15 DAYS)
+  const lowOccupancyAlerts = [];
+  for (let i = 0; i < 15; i++) {
+    const checkDate = new Date(today);
+    checkDate.setDate(checkDate.getDate() + i);
+    const checkDateStr = checkDate.toISOString().split('T')[0];
+    const occ = calculateOccupancy(filteredReservations, filteredListings, checkDateStr);
+
+    filteredListings.forEach(listing => {
+      const isVilla = listing.type && listing.type.toLowerCase().includes('villa');
+      const threshold = isVilla ? 30 : 50;
+
+      if (parseFloat(occ.occupancyPercent) < threshold) {
+        const listingReservations = filteredReservations.filter(r => r.listingId === listing.id);
+        const listingOcc = calculateOccupancy(listingReservations, [listing], checkDateStr);
+        if (parseFloat(listingOcc.occupancyPercent) < threshold) {
+          lowOccupancyAlerts.push({
+            date: checkDate.toLocaleDateString('en-IN'),
+            listing: listing.name || `Listing ${listing.id}`,
+            type: isVilla ? 'Villa' : 'Apartment',
+            occupancy: listingOcc.occupancyPercent,
+          });
+        }
+      }
     });
-    if (data.reservations.length > 5) {
-      report += `... and ${data.reservations.length - 5} more\n`;
+  }
+
+  report += `3️⃣ LOW OCCUPANCY ALERTS (NEXT 15 DAYS)\n`;
+  report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  if (lowOccupancyAlerts.length > 0) {
+    lowOccupancyAlerts.slice(0, 10).forEach(alert => {
+      report += `🚨 ${alert.listing} (${alert.type})\n`;
+      report += `   Date: ${alert.date} | Occupancy: ${alert.occupancy}%\n`;
+    });
+    if (lowOccupancyAlerts.length > 10) {
+      report += `... and ${lowOccupancyAlerts.length - 10} more\n`;
     }
   } else {
-    report += `No active reservations\n`;
+    report += `✅ All properties have good occupancy!\n`;
   }
-
-  // Messages
-  report += `\n💬 Unread Messages: ${data.messages.length}\n`;
-  if (data.messages.length > 0) {
-    data.messages.slice(0, 3).forEach((m, i) => {
-      report += `${i + 1}. From: ${m.guestName || 'Unknown'}\n`;
-    });
-  }
-
-  // Occupancy
-  report += `\n📈 Listings: ${data.listings.length} active\n`;
 
   return report;
 }
@@ -179,7 +241,6 @@ async function sendViaWhatsApp(report) {
       res.on('end', () => {
         const success = res.statusCode === 201;
         console.log('WhatsApp sent:', success ? 'Success' : `Failed (${res.statusCode})`);
-        if (!success) console.log('Error details:', data);
         resolve(success);
       });
     });
@@ -199,7 +260,7 @@ async function main() {
     console.log('Fetching Hostaway data...');
     const data = await getHostawayData();
 
-    const report = formatReport(data);
+    const report = formatReport(data, data.token, HOSTAWAY_ACCOUNT_ID);
     console.log('Report:\n', report);
 
     console.log('\nSending via Resend...');
