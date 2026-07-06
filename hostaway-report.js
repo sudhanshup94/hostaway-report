@@ -81,28 +81,59 @@ async function getHostawayData() {
     headers: { 'Authorization': `Bearer ${token}` },
   });
 
+  // Get calendar data for each listing to detect blocks (next 15 days)
+  const listingsArray = listings.body?.result || [];
+  const calendarData = {};
+  const endDate = new Date();
+  endDate.setDate(endDate.getDate() + 15);
+  const endDateStr = endDate.toISOString().split('T')[0];
+
+  for (const listing of listingsArray) {
+    if (EXCLUDED_LISTINGS.includes(listing.id)) continue;
+
+    const cal = await httpsRequest({
+      hostname: 'api.hostaway.com',
+      path: `/v1/listings/${listing.id}/calendar?accountId=${HOSTAWAY_ACCOUNT_ID}&startDate=${today}&endDate=${endDateStr}`,
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+
+    calendarData[listing.id] = cal.body?.result || [];
+  }
+
   return {
     token,
     reservations: reservations.body?.result || [],
-    listings: listings.body?.result || [],
+    listings: listingsArray,
+    calendar: calendarData,
   };
 }
 
-function calculateOccupancy(reservations, listings, dateStr) {
+function calculateOccupancy(reservations, listings, dateStr, calendarData = {}) {
   const date = new Date(dateStr);
   let occupied = 0;
   let unavailable = 0;
   const total = listings.length;
 
-  reservations.forEach(r => {
-    const arrivalDate = new Date(r.arrivalDate);
-    const departureDate = new Date(r.departureDate);
-    if (arrivalDate <= date && date < departureDate) {
+  listings.forEach(listing => {
+    const hasReservation = reservations.some(r => {
+      const arrivalDate = new Date(r.arrivalDate);
+      const departureDate = new Date(r.departureDate);
+      return r.listingId === listing.id && arrivalDate <= date && date < departureDate;
+    });
+
+    if (hasReservation) {
       occupied++;
+    } else {
+      // Check if listing is blocked on this date
+      const listingCal = calendarData[listing.id] || [];
+      const dayEntry = listingCal.find(c => c.day === dateStr);
+      if (dayEntry && (dayEntry.status === 'blocked' || dayEntry.blocked === true)) {
+        unavailable++;
+      }
     }
   });
 
-  unavailable = total - occupied;
   const availableUnits = total - unavailable;
   const occupancyPercent = availableUnits > 0 ? ((occupied / availableUnits) * 100).toFixed(1) : 0;
 
@@ -123,7 +154,7 @@ function formatReport(data, token, accountId) {
   report += `Delivery time: 6:00 PM every day\n\n`;
 
   // 1. OCCUPANCY FOR TODAY
-  const occupancy = calculateOccupancy(filteredReservations, filteredListings, todayStr);
+  const occupancy = calculateOccupancy(filteredReservations, filteredListings, todayStr, data.calendar);
   report += `1️⃣ OCCUPANCY FOR TODAY\n`;
   report += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
   report += `Total Units: ${occupancy.total}\n`;
@@ -158,23 +189,20 @@ function formatReport(data, token, accountId) {
     const checkDate = new Date(today);
     checkDate.setDate(checkDate.getDate() + i);
     const checkDateStr = checkDate.toISOString().split('T')[0];
-    const occ = calculateOccupancy(filteredReservations, filteredListings, checkDateStr);
 
     filteredListings.forEach(listing => {
       const isVilla = listing.type && listing.type.toLowerCase().includes('villa');
       const threshold = isVilla ? 30 : 50;
 
-      if (parseFloat(occ.occupancyPercent) < threshold) {
-        const listingReservations = filteredReservations.filter(r => r.listingId === listing.id);
-        const listingOcc = calculateOccupancy(listingReservations, [listing], checkDateStr);
-        if (parseFloat(listingOcc.occupancyPercent) < threshold) {
-          lowOccupancyAlerts.push({
-            date: checkDate.toLocaleDateString('en-IN'),
-            listing: listing.name || `Listing ${listing.id}`,
-            type: isVilla ? 'Villa' : 'Apartment',
-            occupancy: listingOcc.occupancyPercent,
-          });
-        }
+      const listingReservations = filteredReservations.filter(r => r.listingId === listing.id);
+      const listingOcc = calculateOccupancy(listingReservations, [listing], checkDateStr, data.calendar);
+      if (parseFloat(listingOcc.occupancyPercent) < threshold) {
+        lowOccupancyAlerts.push({
+          date: checkDate.toLocaleDateString('en-IN'),
+          listing: listing.name || `Listing ${listing.id}`,
+          type: isVilla ? 'Villa' : 'Apartment',
+          occupancy: listingOcc.occupancyPercent,
+        });
       }
     });
   }
