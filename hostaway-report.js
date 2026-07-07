@@ -167,6 +167,24 @@ function calculateOccupancy(reservations, listings, dateStr, calendarData = {}) 
   return { total, occupied, unavailable, occupancyPercent };
 }
 
+function formatWhatsAppReport(occupancy, revenue, lowOccupancyAlerts) {
+  let report = `📊 *Daily Report*\n\n`;
+  report += `📍 *Occupancy*\n`;
+  report += `${occupancy.occupancyPercent}% (${occupancy.occupied}/${occupancy.total - occupancy.unavailable} units)\n\n`;
+
+  report += `💰 *Revenue*\n`;
+  report += `₹${revenue.total.toFixed(0)}\n\n`;
+
+  if (lowOccupancyAlerts.length > 0) {
+    report += `🚨 *Low Occupancy* (${lowOccupancyAlerts.length} properties)\n`;
+    lowOccupancyAlerts.slice(0, 5).forEach(alert => {
+      report += `${alert.listing}: ${alert.occupancy}%\n`;
+    });
+  }
+
+  return report;
+}
+
 function formatReport(data, token, accountId) {
   const today = new Date();
   const todayStr = today.toISOString().split('T')[0];
@@ -266,7 +284,17 @@ function formatReport(data, token, accountId) {
     report += `✅ All properties have good occupancy!\n`;
   }
 
-  return report;
+  return {
+    full: report,
+    occupancy,
+    revenue: {
+      accommodation: accommodationFare,
+      pmCommission,
+      cleaning: cleaningFee,
+      total: accommodationFare + pmCommission + cleaningFee,
+    },
+    lowOccupancyAlerts,
+  };
 }
 
 async function sendViaResend(report) {
@@ -341,14 +369,15 @@ async function main() {
       console.log(JSON.stringify(data.reservations[0], null, 2));
     }
 
-    const report = formatReport(data, data.token, HOSTAWAY_ACCOUNT_ID);
-    console.log('\nReport:\n', report);
+    const reportData = formatReport(data, data.token, HOSTAWAY_ACCOUNT_ID);
+    console.log('\nReport:\n', reportData.full);
 
     console.log('\nSending via Resend...');
-    await sendViaResend(report);
+    await sendViaResend(reportData.full);
 
     console.log('Sending via WhatsApp...');
-    await sendViaWhatsApp(report);
+    const whatsappReport = formatWhatsAppReport(reportData.occupancy, reportData.revenue, reportData.lowOccupancyAlerts);
+    await sendViaWhatsApp(whatsappReport);
 
     console.log('\n✅ Report sent successfully!');
   } catch (error) {
