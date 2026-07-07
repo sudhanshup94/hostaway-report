@@ -117,13 +117,6 @@ async function getHostawayData() {
     calendarData[listing.id] = cal.body?.result || [];
   }
 
-  // Debug: check a sample listing's calendar data
-  const firstListing = listingsArray[0];
-  if (firstListing && calendarData[firstListing.id]) {
-    const todayEntry = calendarData[firstListing.id].find(c => c.date === today);
-    console.log(`\n🔍 DEBUG: First listing ${firstListing.id} (${firstListing.internalListingName})`);
-    console.log(`   Calendar for ${today}:`, todayEntry ? `status=${todayEntry.status}, countReserved=${todayEntry.countReservedUnits}` : 'NO ENTRY');
-  }
 
   // Fetch PM Commission for each reservation from finance calculated fields
   const reservationsArray = reservations.body?.result || [];
@@ -154,26 +147,17 @@ function calculateOccupancy(reservations, listings, dateStr, calendarData = {}) 
   let occupied = 0;
   let unavailable = 0;
   const total = listings.length;
-  let debugCount = 0;
 
   listings.forEach(listing => {
     const listingCal = calendarData[listing.id] || [];
     const dayEntry = listingCal.find(c => c.date === dateStr);
 
-    if (debugCount < 3 && dateStr === new Date().toISOString().split('T')[0]) {
-      console.log(`   Listing ${listing.id}: cal entries=${listingCal.length}, today's entry=${dayEntry ? `status=${dayEntry.status}` : 'NONE'}`);
-      debugCount++;
-    }
-
     if (dayEntry) {
-      // Use calendar status: reserved means occupied, blocked means unavailable
       if (dayEntry.status === 'reserved' && dayEntry.countReservedUnits > 0) {
         occupied++;
       } else if (dayEntry.status === 'blocked' || dayEntry.countBlockedUnits > 0) {
         unavailable++;
       }
-    } else {
-      // No calendar entry means available/empty
     }
   });
 
