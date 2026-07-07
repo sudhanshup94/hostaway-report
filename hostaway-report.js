@@ -341,9 +341,6 @@ async function sendViaWhatsApp(report) {
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         const success = res.statusCode === 201;
-        if (!success) {
-          console.log('WhatsApp error response:', data);
-        }
         console.log('WhatsApp sent:', success ? 'Success' : `Failed (${res.statusCode})`);
         resolve(success);
       });
@@ -363,12 +360,6 @@ async function main() {
   try {
     console.log('Fetching Hostaway data...');
     const data = await getHostawayData();
-
-    if (data.reservations.length > 0) {
-      console.log('\n📋 SAMPLE RESERVATION (for debugging):');
-      console.log(JSON.stringify(data.reservations[0], null, 2));
-    }
-
     const reportData = formatReport(data, data.token, HOSTAWAY_ACCOUNT_ID);
     console.log('\nReport:\n', reportData.full);
 
