@@ -154,10 +154,16 @@ function calculateOccupancy(reservations, listings, dateStr, calendarData = {}) 
   let occupied = 0;
   let unavailable = 0;
   const total = listings.length;
+  let debugCount = 0;
 
   listings.forEach(listing => {
     const listingCal = calendarData[listing.id] || [];
     const dayEntry = listingCal.find(c => c.date === dateStr);
+
+    if (debugCount < 3 && dateStr === new Date().toISOString().split('T')[0]) {
+      console.log(`   Listing ${listing.id}: cal entries=${listingCal.length}, today's entry=${dayEntry ? `status=${dayEntry.status}` : 'NONE'}`);
+      debugCount++;
+    }
 
     if (dayEntry) {
       // Use calendar status: reserved means occupied, blocked means unavailable
