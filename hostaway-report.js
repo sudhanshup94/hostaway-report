@@ -233,15 +233,15 @@ function formatReport(data, token, accountId) {
   const lowOccupancyAlerts = [];
   const listingOccupancyMap = {};
 
-  // Calculate occupancy for each listing over the next 15 days
+  // Calculate average occupancy for each listing over the next 15 days
   filteredListings.forEach(listing => {
     const listingInfo = parseListingType(listing.internalListingName);
     const isVilla = listingInfo.type === 'Villa';
     const threshold = isVilla ? 30 : 50;
-    let minOccupancy = 100;
-    let minOccupancyDate = null;
+    let totalOccupancy = 0;
+    let daysCount = 0;
 
-    // Check all 15 days
+    // Check all 15 days and calculate average
     for (let i = 0; i < 15; i++) {
       const checkDate = new Date(today);
       checkDate.setDate(checkDate.getDate() + i);
@@ -251,20 +251,19 @@ function formatReport(data, token, accountId) {
       const listingOcc = calculateOccupancy(listingReservations, [listing], checkDateStr, data.calendar);
       const occupancyPercent = parseFloat(listingOcc.occupancyPercent);
 
-      if (occupancyPercent < minOccupancy) {
-        minOccupancy = occupancyPercent;
-        minOccupancyDate = checkDate.toLocaleDateString('en-IN');
-      }
+      totalOccupancy += occupancyPercent;
+      daysCount++;
     }
 
-    // If minimum occupancy is below threshold, add alert once
-    if (minOccupancy < threshold) {
+    const averageOccupancy = daysCount > 0 ? totalOccupancy / daysCount : 0;
+
+    // If average occupancy is below threshold, add alert
+    if (averageOccupancy < threshold) {
       lowOccupancyAlerts.push({
         listing: listing.internalListingName || listing.name || `Listing ${listing.id}`,
         type: listingInfo.type,
         bedrooms: listingInfo.bedrooms,
-        minOccupancyDate: minOccupancyDate,
-        occupancy: minOccupancy.toFixed(1),
+        occupancy: averageOccupancy.toFixed(1),
       });
     }
   });
