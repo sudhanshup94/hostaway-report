@@ -194,9 +194,7 @@ function formatReport(data, token, accountId) {
   const filteredListings = data.listings.filter(l => !EXCLUDED_LISTINGS.includes(l.id));
   const filteredReservations = data.reservations.filter(r => !EXCLUDED_LISTINGS.includes(r.listingId));
 
-  let report = `📊 DAILY REPORTS\n`;
-  report += `Date: ${dateDisplay}\n`;
-  report += `Delivery time: 6:00 PM every day\n\n`;
+  let report = `📊 DAILY REPORTS - Date: ${dateDisplay}\n\n`;
 
   // 1. OCCUPANCY FOR TODAY
   const occupancy = calculateOccupancy(filteredReservations, filteredListings, todayStr, data.calendar);
@@ -276,8 +274,7 @@ function formatReport(data, token, accountId) {
 
   if (lowOccupancyAlerts.length > 0) {
     lowOccupancyAlerts.sort((a, b) => parseFloat(a.occupancy) - parseFloat(b.occupancy)).forEach(alert => {
-      report += `🚨 ${alert.listing} (${alert.bedrooms}BR ${alert.type})\n`;
-      report += `   Avg Occupancy (15 days): ${alert.occupancy}%\n`;
+      report += `🚨 ${alert.listing} - ${alert.occupancy}%\n`;
     });
   } else {
     report += `✅ All properties have good occupancy!\n`;
