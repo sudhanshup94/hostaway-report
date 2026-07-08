@@ -231,39 +231,39 @@ function formatReport(data, token, accountId) {
 
   // 3. LOW OCCUPANCY ALERTS (NEXT 15 DAYS)
   const lowOccupancyAlerts = [];
-  const listingOccupancyMap = {};
 
-  // Calculate average occupancy for each listing over the next 15 days
+  // Calculate occupancy for each listing: count booked days / 15 days
   filteredListings.forEach(listing => {
     const listingInfo = parseListingType(listing.internalListingName);
     const isVilla = listingInfo.type === 'Villa';
     const threshold = isVilla ? 30 : 50;
-    let totalOccupancy = 0;
-    let daysCount = 0;
+    let bookedDays = 0;
 
-    // Check all 15 days and calculate average
+    // Check all 15 days and count days when property is reserved
     for (let i = 0; i < 15; i++) {
       const checkDate = new Date(today);
       checkDate.setDate(checkDate.getDate() + i);
       const checkDateStr = checkDate.toISOString().split('T')[0];
 
-      const listingReservations = filteredReservations.filter(r => r.listingMapId === listing.id);
-      const listingOcc = calculateOccupancy(listingReservations, [listing], checkDateStr, data.calendar);
-      const occupancyPercent = parseFloat(listingOcc.occupancyPercent);
+      const listingCal = data.calendar[listing.id] || [];
+      const dayEntry = listingCal.find(c => c.date === checkDateStr);
 
-      totalOccupancy += occupancyPercent;
-      daysCount++;
+      // Count as booked if status is reserved (not blocked)
+      if (dayEntry && dayEntry.status === 'reserved' && dayEntry.countReservedUnits > 0) {
+        bookedDays++;
+      }
     }
 
-    const averageOccupancy = daysCount > 0 ? totalOccupancy / daysCount : 0;
+    // Calculate occupancy as percentage of 15 days
+    const occupancyPercent = (bookedDays / 15) * 100;
 
-    // If average occupancy is below threshold, add alert
-    if (averageOccupancy < threshold) {
+    // If occupancy is below threshold, add alert
+    if (occupancyPercent < threshold) {
       lowOccupancyAlerts.push({
         listing: listing.internalListingName || listing.name || `Listing ${listing.id}`,
         type: listingInfo.type,
         bedrooms: listingInfo.bedrooms,
-        occupancy: averageOccupancy.toFixed(1),
+        occupancy: occupancyPercent.toFixed(1),
       });
     }
   });
