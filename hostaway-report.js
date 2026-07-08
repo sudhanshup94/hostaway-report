@@ -277,7 +277,7 @@ function formatReport(data, token, accountId) {
   if (lowOccupancyAlerts.length > 0) {
     lowOccupancyAlerts.sort((a, b) => parseFloat(a.occupancy) - parseFloat(b.occupancy)).forEach(alert => {
       report += `🚨 ${alert.listing} (${alert.bedrooms}BR ${alert.type})\n`;
-      report += `   Min Occupancy: ${alert.occupancy}% on ${alert.minOccupancyDate}\n`;
+      report += `   Avg Occupancy (15 days): ${alert.occupancy}%\n`;
     });
   } else {
     report += `✅ All properties have good occupancy!\n`;
