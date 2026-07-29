@@ -245,7 +245,16 @@ async function getHostawayData() {
     })
   );
 
-  const pmCommissionResults = await Promise.all(pmCommissionFetches);
+  // Add timeout to prevent infinite hanging on PM Commission fetches
+  const PM_COMMISSION_TIMEOUT = 10 * 60 * 1000; // 10 minutes max
+  const pmCommissionPromise = Promise.all(pmCommissionFetches);
+  const timeoutPromise = new Promise(resolve =>
+    setTimeout(() => {
+      console.warn(`PM Commission fetch timeout after ${PM_COMMISSION_TIMEOUT / 1000}s - continuing with zero values`);
+      resolve([]);
+    }, PM_COMMISSION_TIMEOUT)
+  );
+  const pmCommissionResults = await Promise.race([pmCommissionPromise, timeoutPromise]);
   pmCommissionResults.forEach(result => {
     pmCommissions[result.reservationId] = result.pmCommission;
   });
