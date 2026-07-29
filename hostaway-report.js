@@ -222,21 +222,33 @@ async function getHostawayData() {
   const allListingReservations = await Promise.all(listingFetches);
   allReservations = allListingReservations.flat();
 
-  // Fetch PM Commission for each reservation
+  // Fetch PM Commission for each reservation (parallelized with same limiter)
   const reservationsArray = allReservations;
   const pmCommissions = {};
 
-  for (const reservation of reservationsArray) {
-    const financeRes = await httpsRequest({
-      hostname: 'api.hostaway.com',
-      path: `/v1/financeCalculatedField/reservation/${reservation.id}?accountId=${HOSTAWAY_ACCOUNT_ID}`,
-      method: 'GET',
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
+  const pmCommissionFetches = reservationsArray.map((reservation) =>
+    limiter(async () => {
+      try {
+        const financeRes = await httpsRequest({
+          hostname: 'api.hostaway.com',
+          path: `/v1/financeCalculatedField/reservation/${reservation.id}?accountId=${HOSTAWAY_ACCOUNT_ID}`,
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
 
-    const pmData = financeRes.body?.result?.find(f => f.formulaName === 'pmCommission');
-    pmCommissions[reservation.id] = pmData?.formulaResult || 0;
-  }
+        const pmData = financeRes.body?.result?.find(f => f.formulaName === 'pmCommission');
+        return { reservationId: reservation.id, pmCommission: pmData?.formulaResult || 0 };
+      } catch (err) {
+        console.error(`Error fetching PM Commission for reservation ${reservation.id}: ${err.message}`);
+        return { reservationId: reservation.id, pmCommission: 0 };
+      }
+    })
+  );
+
+  const pmCommissionResults = await Promise.all(pmCommissionFetches);
+  pmCommissionResults.forEach(result => {
+    pmCommissions[result.reservationId] = result.pmCommission;
+  });
 
   return {
     token,
