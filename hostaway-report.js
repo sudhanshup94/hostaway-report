@@ -192,23 +192,23 @@ async function getHostawayData() {
   const listingFetches = filteredListings.map((listing) =>
     limiter(async () => {
       try {
-        // Get calendar data
-        const cal = await httpsRequest({
-          hostname: 'api.hostaway.com',
-          path: `/v1/listings/${listing.id}/calendar?accountId=${HOSTAWAY_ACCOUNT_ID}&startDate=${today}&endDate=${endDateStr}`,
-          method: 'GET',
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
+        // Fetch calendar and reservations in parallel (they're independent)
+        const [cal, listingResRes] = await Promise.all([
+          httpsRequest({
+            hostname: 'api.hostaway.com',
+            path: `/v1/listings/${listing.id}/calendar?accountId=${HOSTAWAY_ACCOUNT_ID}&startDate=${today}&endDate=${endDateStr}`,
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` },
+          }),
+          httpsRequest({
+            hostname: 'api.hostaway.com',
+            path: `/v1/reservations?accountId=${HOSTAWAY_ACCOUNT_ID}&listingId=${listing.id}&status=active,confirmed,new,modified&departureDateFrom=${today}&limit=500`,
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` },
+          })
+        ]);
 
         calendarData[listing.id] = cal.body?.result || [];
-
-        // Get reservations for this specific listing (only active/upcoming, departing today or later)
-        const listingResRes = await httpsRequest({
-          hostname: 'api.hostaway.com',
-          path: `/v1/reservations?accountId=${HOSTAWAY_ACCOUNT_ID}&listingId=${listing.id}&status=active,confirmed,new,modified&departureDateFrom=${today}&limit=500`,
-          method: 'GET',
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
 
         return listingResRes.body?.result || [];
       } catch (err) {
