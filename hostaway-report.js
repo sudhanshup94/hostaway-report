@@ -597,18 +597,9 @@ async function sendViaGmail(report) {
   });
 
   try {
-    // Verify SMTP connection
-    await transporter.verify();
-    console.log('✓ SMTP connection verified successfully');
-  } catch (err) {
-    console.error(`❌ SMTP verification failed: ${err.message}`);
-    if (err.code) console.error(`   Error code: ${err.code}`);
-    if (err.responseCode) console.error(`   SMTP response code: ${err.responseCode}`);
-    return false;
-  }
-
-  try {
     // Send email to all recipients in a single message
+    console.log(`Sending email to: ${recipients.join(', ')}`);
+    console.log(`From: ${EMAIL_FROM}`);
     const result = await transporter.sendMail({
       from: EMAIL_FROM,
       to: recipients,
@@ -617,14 +608,16 @@ async function sendViaGmail(report) {
       text: report,
     });
 
-    console.log(`✓ Email sent successfully`);
+    console.log(`✓ Email sent successfully to ${recipients.length} recipients`);
     console.log(`  Message ID: ${result.messageId}`);
-    console.log(`  Recipients: ${recipients.length}`);
+    console.log(`  Response: ${JSON.stringify(result.response)}`);
     return true;
   } catch (err) {
     console.error(`❌ Email delivery failed: ${err.message}`);
+    console.error(`  Full error: ${JSON.stringify(err)}`);
     if (err.code) console.error(`   Error code: ${err.code}`);
     if (err.responseCode) console.error(`   SMTP response code: ${err.responseCode}`);
+    if (err.command) console.error(`   SMTP command: ${err.command}`);
     return false;
   }
 }
