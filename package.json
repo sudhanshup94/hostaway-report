@@ -6,7 +6,14 @@
   "scripts": {
     "start": "node hostaway-report.js"
   },
-  "keywords": ["hostaway", "automation", "reports"],
+  "keywords": [
+    "hostaway",
+    "automation",
+    "reports"
+  ],
   "author": "",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "nodemailer": "^9.0.3"
+  }
 }
