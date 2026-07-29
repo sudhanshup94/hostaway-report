@@ -571,7 +571,7 @@ async function sendViaGmail(report) {
     return false;
   }
 
-  // Create Nodemailer transporter
+  // Create Nodemailer transporter with connection timeouts
   const transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
@@ -580,6 +580,8 @@ async function sendViaGmail(report) {
       user: SMTP_USER,
       pass: SMTP_PASS,
     },
+    connectionTimeout: 10000, // 10 seconds
+    socketTimeout: 10000, // 10 seconds
   });
 
   try {
