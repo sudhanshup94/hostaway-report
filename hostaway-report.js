@@ -91,13 +91,20 @@ function parseListingType(listingName) {
   };
 }
 
-async function httpsRequest(options, data = null, retries = 3) {
+async function httpsRequest(options, data = null, retries = 3, abortSignal = null) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       return await new Promise((resolve, reject) => {
+        // Check if abort signal is already aborted
+        if (abortSignal?.aborted) {
+          reject(new Error('Request aborted'));
+          return;
+        }
+
         // Add agent to options for connection pooling
         options.agent = httpsAgent;
         options.timeout = 60000; // 60 second timeout
+        options.signal = abortSignal; // Pass abort signal to request
 
         const req = https.request(options, (res) => {
           let body = '';
@@ -119,10 +126,20 @@ async function httpsRequest(options, data = null, retries = 3) {
           reject(new Error('Request timeout'));
         });
         req.on('error', reject);
+
+        // Listen for abort signal
+        if (abortSignal) {
+          abortSignal.addEventListener('abort', () => {
+            req.destroy();
+            reject(new Error('Request aborted'));
+          });
+        }
+
         if (data) req.write(JSON.stringify(data));
         req.end();
       });
     } catch (err) {
+      if (err.message === 'Request aborted') throw err; // Don't retry aborted requests
       if (attempt === retries) throw err;
       if (err.message === 'Request timeout') {
         console.log(`Retry ${attempt}/${retries} for request...`);
@@ -226,6 +243,14 @@ async function getHostawayData() {
   const reservationsArray = allReservations;
   const pmCommissions = {};
 
+  // Use AbortController to actually cancel PM Commission requests after timeout
+  const pmCommissionController = new AbortController();
+  const PM_COMMISSION_TIMEOUT = 5 * 60 * 1000; // 5 minutes max
+  const timeoutId = setTimeout(() => {
+    console.warn(`PM Commission fetch timeout after ${PM_COMMISSION_TIMEOUT / 1000}s - aborting requests`);
+    pmCommissionController.abort();
+  }, PM_COMMISSION_TIMEOUT);
+
   const pmCommissionFetches = reservationsArray.map((reservation) =>
     limiter(async () => {
       try {
@@ -234,7 +259,7 @@ async function getHostawayData() {
           path: `/v1/financeCalculatedField/reservation/${reservation.id}?accountId=${HOSTAWAY_ACCOUNT_ID}`,
           method: 'GET',
           headers: { 'Authorization': `Bearer ${token}` },
-        });
+        }, null, 3, pmCommissionController.signal);
 
         const pmData = financeRes.body?.result?.find(f => f.formulaName === 'pmCommission');
         return { reservationId: reservation.id, pmCommission: pmData?.formulaResult || 0 };
@@ -245,19 +270,19 @@ async function getHostawayData() {
     })
   );
 
-  // Add timeout to prevent infinite hanging on PM Commission fetches
-  const PM_COMMISSION_TIMEOUT = 10 * 60 * 1000; // 10 minutes max
-  const pmCommissionPromise = Promise.all(pmCommissionFetches);
-  const timeoutPromise = new Promise(resolve =>
-    setTimeout(() => {
-      console.warn(`PM Commission fetch timeout after ${PM_COMMISSION_TIMEOUT / 1000}s - continuing with zero values`);
-      resolve([]);
-    }, PM_COMMISSION_TIMEOUT)
-  );
-  const pmCommissionResults = await Promise.race([pmCommissionPromise, timeoutPromise]);
-  pmCommissionResults.forEach(result => {
-    pmCommissions[result.reservationId] = result.pmCommission;
-  });
+  try {
+    const pmCommissionResults = await Promise.all(pmCommissionFetches);
+    clearTimeout(timeoutId);
+    pmCommissionResults.forEach(result => {
+      pmCommissions[result.reservationId] = result.pmCommission;
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      console.warn('PM Commission fetch was aborted due to timeout');
+    } else {
+      console.error('PM Commission fetch error:', err.message);
+    }
+  }
 
   return {
     token,
