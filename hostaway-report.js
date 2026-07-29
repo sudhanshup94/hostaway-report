@@ -1,26 +1,79 @@
 const https = require('https');
+const nodemailer = require('nodemailer');
 
 const HOSTAWAY_ACCOUNT_ID = process.env.HOSTAWAY_ACCOUNT_ID;
 const HOSTAWAY_API_KEY = process.env.HOSTAWAY_API_KEY;
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const RESEND_SENDER = process.env.RESEND_SENDER;
-const RESEND_RECIPIENT = process.env.RESEND_RECIPIENT;
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = String(process.env.SMTP_SECURE || 'false').toLowerCase() === 'true';
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const EMAIL_FROM = process.env.EMAIL_FROM;
+const EMAIL_TO = process.env.EMAIL_TO;
 const WHATSAPP_RECIPIENT = process.env.WHATSAPP_RECIPIENT;
 const EXCLUDED_LISTINGS = [488785];
 
+// Connection pool with limited concurrent connections to avoid timeouts
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 5,
+  maxFreeSockets: 2,
+  timeout: 30000,
+  freeSocketTimeout: 30000,
+});
+
 // Get today's date in IST (Asia/Kolkata timezone)
 function getTodayIST() {
-  const now = new Date();
-  const istTime = new Date(now.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }));
-  return istTime.toISOString().split('T')[0];
+  const istFormatter = new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    timeZone: 'Asia/Kolkata'
+  });
+  const parts = istFormatter.formatToParts(new Date());
+  const year = parts.find(p => p.type === 'year').value;
+  const month = parts.find(p => p.type === 'month').value;
+  const day = parts.find(p => p.type === 'day').value;
+  return `${year}-${month}-${day}`;
 }
 
 // Get a date N days from today in IST
 function getDateNDaysFromTodayIST(n) {
   const today = getTodayIST();
-  const date = new Date(today + 'T00:00:00Z');
+  const date = new Date(today);
   date.setDate(date.getDate() + n);
   return date.toISOString().split('T')[0];
+}
+
+// Limit concurrent promises to avoid overwhelming the API
+function promiseLimit(concurrency) {
+  let running = 0;
+  const queue = [];
+
+  return (fn) => {
+    return new Promise((resolve, reject) => {
+      const task = async () => {
+        try {
+          resolve(await fn());
+        } catch (err) {
+          reject(err);
+        } finally {
+          running--;
+          if (queue.length > 0) {
+            const next = queue.shift();
+            next();
+          }
+        }
+      };
+
+      if (running < concurrency) {
+        running++;
+        task();
+      } else {
+        queue.push(task);
+      }
+    });
+  };
 }
 
 function parseListingType(listingName) {
@@ -38,26 +91,47 @@ function parseListingType(listingName) {
   };
 }
 
-function httpsRequest(options, data = null) {
-  return new Promise((resolve, reject) => {
-    const req = https.request(options, (res) => {
-      let body = '';
-      res.on('data', (chunk) => body += chunk);
-      res.on('end', () => {
-        try {
-          resolve({
-            status: res.statusCode,
-            body: body ? JSON.parse(body) : null,
+async function httpsRequest(options, data = null, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await new Promise((resolve, reject) => {
+        // Add agent to options for connection pooling
+        options.agent = httpsAgent;
+        options.timeout = 60000; // 60 second timeout
+
+        const req = https.request(options, (res) => {
+          let body = '';
+          res.on('data', (chunk) => body += chunk);
+          res.on('end', () => {
+            try {
+              resolve({
+                status: res.statusCode,
+                body: body ? JSON.parse(body) : null,
+              });
+            } catch (e) {
+              resolve({ status: res.statusCode, body });
+            }
           });
-        } catch (e) {
-          resolve({ status: res.statusCode, body });
-        }
+        });
+
+        req.on('timeout', () => {
+          req.destroy();
+          reject(new Error('Request timeout'));
+        });
+        req.on('error', reject);
+        if (data) req.write(JSON.stringify(data));
+        req.end();
       });
-    });
-    req.on('error', reject);
-    if (data) req.write(JSON.stringify(data));
-    req.end();
-  });
+    } catch (err) {
+      if (attempt === retries) throw err;
+      if (err.message === 'Request timeout') {
+        console.log(`Retry ${attempt}/${retries} for request...`);
+        await new Promise(r => setTimeout(r, 1000 * attempt)); // Wait before retry
+      } else {
+        throw err;
+      }
+    }
+  }
 }
 
 async function getHostawayData() {
@@ -96,15 +170,8 @@ async function getHostawayData() {
   const today = getTodayIST();
   const endDateStr = getDateNDaysFromTodayIST(15);
 
-  // Get reservations
-  const reservations = await httpsRequest({
-    hostname: 'api.hostaway.com',
-    path: `/v1/reservations?accountId=${HOSTAWAY_ACCOUNT_ID}&status=active,confirmed`,
-    method: 'GET',
-    headers: { 'Authorization': `Bearer ${token}` },
-  });
-
   // Get listings
+  console.log('Fetching listings...');
   const listings = await httpsRequest({
     hostname: 'api.hostaway.com',
     path: `/v1/listings?accountId=${HOSTAWAY_ACCOUNT_ID}`,
@@ -112,25 +179,51 @@ async function getHostawayData() {
     headers: { 'Authorization': `Bearer ${token}` },
   });
 
-  // Get calendar data for each listing
+  // Get calendar data and reservations for each listing (with concurrency limit to avoid timeouts)
   const listingsArray = listings.body?.result || [];
+  console.log(`Found ${listingsArray.length} listings`);
   const calendarData = {};
+  let allReservations = [];
 
-  for (const listing of listingsArray) {
-    if (EXCLUDED_LISTINGS.includes(listing.id)) continue;
+  // Limit concurrency to 5 simultaneous requests to avoid overwhelming the API
+  const limiter = promiseLimit(5);
+  const filteredListings = listingsArray.filter(l => !EXCLUDED_LISTINGS.includes(l.id));
 
-    const cal = await httpsRequest({
-      hostname: 'api.hostaway.com',
-      path: `/v1/listings/${listing.id}/calendar?accountId=${HOSTAWAY_ACCOUNT_ID}&startDate=${today}&endDate=${endDateStr}`,
-      method: 'GET',
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
+  const listingFetches = filteredListings.map((listing) =>
+    limiter(async () => {
+      try {
+        // Get calendar data
+        const cal = await httpsRequest({
+          hostname: 'api.hostaway.com',
+          path: `/v1/listings/${listing.id}/calendar?accountId=${HOSTAWAY_ACCOUNT_ID}&startDate=${today}&endDate=${endDateStr}`,
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
 
-    calendarData[listing.id] = cal.body?.result || [];
-  }
+        calendarData[listing.id] = cal.body?.result || [];
+
+        // Get reservations for this specific listing (only active/upcoming, departing today or later)
+        const listingResRes = await httpsRequest({
+          hostname: 'api.hostaway.com',
+          path: `/v1/reservations?accountId=${HOSTAWAY_ACCOUNT_ID}&listingId=${listing.id}&status=active,confirmed,new,modified&departureDateFrom=${today}&limit=500`,
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+
+        return listingResRes.body?.result || [];
+      } catch (err) {
+        console.error(`Error fetching data for listing ${listing.id}: ${err.message}`);
+        return [];
+      }
+    })
+  );
+
+  // Wait for all listing fetches to complete
+  const allListingReservations = await Promise.all(listingFetches);
+  allReservations = allListingReservations.flat();
 
   // Fetch PM Commission for each reservation
-  const reservationsArray = reservations.body?.result || [];
+  const reservationsArray = allReservations;
   const pmCommissions = {};
 
   for (const reservation of reservationsArray) {
@@ -159,6 +252,19 @@ async function getHostawayData() {
 function isConfirmedGuestReservation(reservation) {
   const confirmableStatuses = ['active', 'confirmed', 'new', 'modified'];
   return confirmableStatuses.includes(reservation.status?.toLowerCase());
+}
+
+// Check if reservation is from homeowner (not a paying guest)
+function isHomeownerReservation(reservation) {
+  // Homeowner reservations typically have:
+  // - channelName like "Owner", "Homeowner", "Owner Stay"
+  // - Or no guest name / empty guest name
+  if (!reservation) return false;
+
+  const channelName = (reservation.channelName || '').toLowerCase();
+  const isOwnerChannel = channelName.includes('owner') || channelName.includes('homeowner');
+
+  return isOwnerChannel;
 }
 
 // Check if reservation is active on a given date (arrivalDate <= date AND departureDate > date)
@@ -190,12 +296,28 @@ function calculateTodayOccupancy(reservations, listings, today, calendarData) {
     const dayEntry = listingCal.find(c => c.date === today);
 
     if (dayEntry) {
-      // Check if there's a guest reservation
-      const guestReservation = filteredReservations.find(r => r.listingMapId === listing.id && isReservationActiveOnDate(r, today));
+      // Check if reserved - if so, determine if guest or homeowner
+      if (dayEntry.status === 'reserved' && dayEntry.countReservedUnits > 0) {
+        // Check if there's a matching guest reservation for this listing on this date
+        const matchingReservation = filteredReservations.find(
+          r => r.listingMapId === listing.id && isReservationActiveOnDate(r, today)
+        );
 
-      if (guestReservation && dayEntry.status === 'reserved' && dayEntry.countReservedUnits > 0) {
-        occupiedUnits++;
-      } else if (dayEntry.status !== 'available' && dayEntry.status !== 'reserved') {
+        if (matchingReservation) {
+          // Found a reservation - check if it's a homeowner or guest
+          if (isHomeownerReservation(matchingReservation)) {
+            // Homeowner reservations count as unavailable, not occupied
+            unavailableUnits++;
+          } else {
+            // Guest reservation - it's occupied
+            occupiedUnits++;
+          }
+        } else {
+          // Calendar shows reserved but no guest reservation found
+          // This is likely a homeowner block or maintenance block marked as reserved
+          unavailableUnits++;
+        }
+      } else if (dayEntry.status !== 'available' && dayEntry.status !== 'open' && dayEntry.status !== 'reserved') {
         // Blocked, maintenance, owner stay, etc.
         unavailableUnits++;
       } else if (dayEntry.countBlockedUnits > 0 || (dayEntry.isAvailable === false || dayEntry.isAvailable === 0)) {
@@ -250,7 +372,7 @@ function calculateTodayRevenue(reservations, today, pmCommissions) {
 }
 
 // Calculate low occupancy alerts for next 15 days
-function calculateLowOccupancyAlerts(listings, today, calendarData) {
+function calculateLowOccupancyAlerts(listings, today, calendarData, reservations) {
   const filteredListings = listings.filter(l => !EXCLUDED_LISTINGS.includes(l.id));
   const alerts = [];
   const debugData = [];
@@ -294,6 +416,21 @@ function calculateLowOccupancyAlerts(listings, today, calendarData) {
 
     // Store debug data
     const todayCalEntry = listingCal.find(c => c.date === today);
+
+    // Determine if occupied (same logic as occupancy calculation)
+    // Only count as occupied if: (1) calendar shows reserved, AND (2) we have a matching guest reservation
+    let isTodayOccupied = false;
+    if (todayCalEntry?.status === 'reserved' && todayCalEntry?.countReservedUnits > 0) {
+      const filteredReservations = reservations.filter(r => !EXCLUDED_LISTINGS.includes(r.listingId) && isConfirmedGuestReservation(r));
+      const matchingReservation = filteredReservations.find(
+        r => r.listingMapId === listing.id && isReservationActiveOnDate(r, today)
+      );
+      // Only occupied if we found a reservation AND it's not a homeowner reservation
+      if (matchingReservation && !isHomeownerReservation(matchingReservation)) {
+        isTodayOccupied = true;
+      }
+    }
+
     debugData.push({
       listingId: listing.id,
       internalListingName: listing.internalListingName,
@@ -301,7 +438,7 @@ function calculateLowOccupancyAlerts(listings, today, calendarData) {
       todayCalendarStatus: todayCalEntry?.status || 'unknown',
       todayReservationStatus: todayCalEntry?.status === 'reserved' ? 'booked' : 'available',
       isAvailableToday: todayCalEntry?.isAvailable !== false && todayCalEntry?.status === 'available',
-      isOccupiedToday: todayCalEntry?.status === 'reserved',
+      isOccupiedToday: isTodayOccupied,
       isUnavailableToday: todayCalEntry?.status !== 'available' && todayCalEntry?.status !== 'reserved',
       guestBookedDaysNext15: guestBookedDays,
       homeownerStayDaysNext15: homeownerStayDays,
@@ -410,27 +547,72 @@ function printDebugTable(debugData) {
   console.table(debugData);
 }
 
-async function sendViaResend(report) {
-  const response = await httpsRequest(
-    {
-      hostname: 'api.resend.com',
-      path: '/emails',
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${RESEND_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
+async function sendViaGmail(report) {
+  // Validate required environment variables
+  const missingVars = [];
+  if (!SMTP_USER) missingVars.push('SMTP_USER');
+  if (!SMTP_PASS) missingVars.push('SMTP_PASS');
+  if (!EMAIL_FROM) missingVars.push('EMAIL_FROM');
+  if (!EMAIL_TO) missingVars.push('EMAIL_TO');
+
+  if (missingVars.length > 0) {
+    console.error(`❌ Missing email configuration: ${missingVars.join(', ')}`);
+    return false;
+  }
+
+  // Parse recipients from EMAIL_TO (comma-separated or Google Group)
+  const recipients = EMAIL_TO
+    .split(',')
+    .map(email => email.trim())
+    .filter(Boolean);
+
+  if (recipients.length === 0) {
+    console.log('Email skipped: No recipients configured');
+    return false;
+  }
+
+  // Create Nodemailer transporter
+  const transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS,
     },
-    {
-      from: RESEND_SENDER,
-      to: RESEND_RECIPIENT,
+  });
+
+  try {
+    // Verify SMTP connection
+    await transporter.verify();
+    console.log('✓ SMTP connection verified successfully');
+  } catch (err) {
+    console.error(`❌ SMTP verification failed: ${err.message}`);
+    if (err.code) console.error(`   Error code: ${err.code}`);
+    if (err.responseCode) console.error(`   SMTP response code: ${err.responseCode}`);
+    return false;
+  }
+
+  try {
+    // Send email to all recipients in a single message
+    const result = await transporter.sendMail({
+      from: EMAIL_FROM,
+      to: recipients,
       subject: '📊 Hostaway Daily Report',
       html: `<pre style="font-family: monospace; white-space: pre-wrap;">${report.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`,
-    }
-  );
+      text: report,
+    });
 
-  console.log('Email sent:', response.status === 200 ? 'Success' : `Failed (${response.status})`);
-  return response.status === 200;
+    console.log(`✓ Email sent successfully`);
+    console.log(`  Message ID: ${result.messageId}`);
+    console.log(`  Recipients: ${recipients.length}`);
+    return true;
+  } catch (err) {
+    console.error(`❌ Email delivery failed: ${err.message}`);
+    if (err.code) console.error(`   Error code: ${err.code}`);
+    if (err.responseCode) console.error(`   SMTP response code: ${err.responseCode}`);
+    return false;
+  }
 }
 
 async function sendViaWhatsApp(report) {
@@ -481,7 +663,7 @@ async function main() {
     const revenue = calculateTodayRevenue(data.reservations, data.today, data.pmCommissions);
 
     console.log('Calculating low occupancy alerts...');
-    const { alerts: lowOccupancyAlerts, debugData } = calculateLowOccupancyAlerts(data.listings, data.today, data.calendar);
+    const { alerts: lowOccupancyAlerts, debugData } = calculateLowOccupancyAlerts(data.listings, data.today, data.calendar, data.reservations);
 
     console.log('\n📊 REPORT SUMMARY');
     console.log('=================');
@@ -498,6 +680,19 @@ async function main() {
     console.log(`✓ Villas below 30%: ${villaAlerts}`);
     console.log(`✓ Apartments below 50%: ${apartmentAlerts}`);
 
+    // Print occupied units list with reservation details
+    console.log('\n🏠 OCCUPIED UNITS TODAY:\n');
+    const occupiedUnits = debugData.filter(d => d.isOccupiedToday);
+    occupiedUnits.forEach((unit, idx) => {
+      // Find matching reservations for debug info
+      const matchingRes = data.reservations.find(r => r.listingMapId === unit.listingId &&
+        new Date(r.arrivalDate).toISOString().split('T')[0] <= data.today &&
+        new Date(r.departureDate).toISOString().split('T')[0] > data.today);
+      const channelInfo = matchingRes ? ` [${matchingRes.channelName}]` : '';
+      console.log(`${idx + 1}. ${unit.internalListingName} (ID: ${unit.listingId}) - Status: ${unit.todayCalendarStatus}${channelInfo}`);
+    });
+    console.log(`\nTotal Occupied: ${occupiedUnits.length}\n`);
+
     // Print debug table
     printDebugTable(debugData.slice(0, 5)); // Show first 5 for brevity
 
@@ -507,7 +702,7 @@ async function main() {
     console.log(emailReport);
 
     console.log('\nSending via Resend...');
-    await sendViaResend(emailReport);
+    await sendViaGmail(emailReport);
 
     console.log('Sending via WhatsApp...');
     const whatsappReport = formatWhatsAppReport(occupancy, revenue, lowOccupancyAlerts);
