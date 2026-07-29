@@ -225,6 +225,7 @@ async function getHostawayData() {
   // Fetch PM Commission for each reservation (parallelized with same limiter)
   const reservationsArray = allReservations;
   const pmCommissions = {};
+  console.log(`Fetching PM Commission for ${reservationsArray.length} reservations...`);
 
   const pmCommissionFetches = reservationsArray.map((reservation) =>
     limiter(async () => {
@@ -245,10 +246,13 @@ async function getHostawayData() {
     })
   );
 
+  console.log(`Waiting for PM Commission fetches to complete...`);
   const pmCommissionResults = await Promise.all(pmCommissionFetches);
+  console.log(`PM Commission fetches completed. Processing ${pmCommissionResults.length} results...`);
   pmCommissionResults.forEach(result => {
     pmCommissions[result.reservationId] = result.pmCommission;
   });
+  console.log(`PM Commission data processed.`);
 
   return {
     token,
