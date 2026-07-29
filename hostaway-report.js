@@ -352,7 +352,25 @@ function calculateTodayOccupancy(reservations, listings, today, calendarData) {
 
 // Calculate revenue for today (prorated by night)
 function calculateTodayRevenue(reservations, today, pmCommissions) {
+  console.log(`\n=== REVENUE CALCULATION DEBUG ===`);
+  console.log(`Total reservations received: ${reservations.length}`);
+
+  const excludedByListing = reservations.filter(r => EXCLUDED_LISTINGS.includes(r.listingId));
+  console.log(`Excluded by listing: ${excludedByListing.length}`);
+
+  const notConfirmedGuest = reservations.filter(r => !EXCLUDED_LISTINGS.includes(r.listingId) && !isConfirmedGuestReservation(r));
+  console.log(`Not confirmed guest (status not in ['active', 'confirmed', 'new', 'modified']): ${notConfirmedGuest.length}`);
+  if (notConfirmedGuest.length > 0) {
+    notConfirmedGuest.forEach(r => {
+      console.log(`  - ${r.guestName}: status="${r.status}", listing="${r.listingMapId}"`);
+    });
+  }
+
+  const notActiveOnDate = reservations.filter(r => !EXCLUDED_LISTINGS.includes(r.listingId) && isConfirmedGuestReservation(r) && !isReservationActiveOnDate(r, today));
+  console.log(`Not active on ${today}: ${notActiveOnDate.length}`);
+
   const filteredReservations = reservations.filter(r => !EXCLUDED_LISTINGS.includes(r.listingId) && isConfirmedGuestReservation(r) && isReservationActiveOnDate(r, today));
+  console.log(`Final filtered reservations for revenue: ${filteredReservations.length}`);
 
   let accommodationFare = 0;
   let cleaningFee = 0;
@@ -375,6 +393,11 @@ function calculateTodayRevenue(reservations, today, pmCommissions) {
       cleaningFee += (r.cleaningFee || 0);
     }
   });
+
+  console.log(`Accommodation Fare: ${accommodationFare.toFixed(2)}`);
+  console.log(`PM Commission: ${pmCommission.toFixed(2)}`);
+  console.log(`Cleaning Fee: ${cleaningFee.toFixed(2)}`);
+  console.log(`=== END DEBUG ===\n`);
 
   return {
     accommodationFare: Math.max(0, accommodationFare),
