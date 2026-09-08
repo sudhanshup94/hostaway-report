@@ -187,18 +187,36 @@ async function getHostawayData() {
   const today = getTodayIST();
   const endDateStr = getDateNDaysFromTodayIST(15);
 
-  // Get listings
-  console.log('Fetching listings...');
-  const listings = await httpsRequest({
-    hostname: 'api.hostaway.com',
-    path: `/v1/listings?accountId=${HOSTAWAY_ACCOUNT_ID}`,
-    method: 'GET',
-    headers: { 'Authorization': `Bearer ${token}` },
-  });
+  // Get listings with pagination (Hostaway default limit is 100, need to fetch all)
+  console.log('Fetching all listings (with pagination)...');
+  let allListings = [];
+  let offset = 0;
+  const listingLimit = 500;
+  let totalFetched = 0;
+
+  while (true) {
+    const listingsRes = await httpsRequest({
+      hostname: 'api.hostaway.com',
+      path: `/v1/listings?accountId=${HOSTAWAY_ACCOUNT_ID}&limit=${listingLimit}&offset=${offset}`,
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+
+    const listings = listingsRes.body?.result || [];
+    if (listings.length === 0) {
+      console.log(`✓ Pagination complete at offset ${offset}`);
+      break;
+    }
+
+    allListings = allListings.concat(listings);
+    totalFetched += listings.length;
+    console.log(`  Page ${Math.ceil(totalFetched / listingLimit)}: ${listings.length} listings (total: ${totalFetched})`);
+    offset += listingLimit;
+  }
 
   // Get calendar data and reservations for each listing (with concurrency limit to avoid timeouts)
-  const listingsArray = listings.body?.result || [];
-  console.log(`Found ${listingsArray.length} listings`);
+  const listingsArray = allListings;
+  console.log(`✓ Found ${listingsArray.length} total listings (fetched with pagination)`);
   const calendarData = {};
   let allReservations = [];
 
