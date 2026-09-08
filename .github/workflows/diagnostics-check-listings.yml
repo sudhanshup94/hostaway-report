@@ -1,0 +1,20 @@
+name: Diagnostic - Check Total Listings
+
+on: workflow_dispatch
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Check Total Listings
+        env:
+          HOSTAWAY_ACCOUNT_ID: ${{ secrets.HOSTAWAY_ACCOUNT_ID }}
+          HOSTAWAY_API_KEY: ${{ secrets.HOSTAWAY_API_KEY }}
+        run: node check-total-listings.js
