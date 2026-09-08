@@ -257,19 +257,19 @@ async function getHostawayData() {
   const allListingReservations = await Promise.all(listingFetches);
   allReservations = allListingReservations.flat();
 
-  // Fetch PM Commission for each reservation (parallelized with same limiter)
+  // Fetch financial data (accommodationFare, pmCommission, cleaningFee) for each reservation
   const reservationsArray = allReservations;
-  const pmCommissions = {};
+  const financialData = {};
 
-  // Use AbortController to actually cancel PM Commission requests after timeout
-  const pmCommissionController = new AbortController();
-  const PM_COMMISSION_TIMEOUT = 5 * 60 * 1000; // 5 minutes max
+  // Use AbortController to cancel finance requests after timeout
+  const financeController = new AbortController();
+  const FINANCE_TIMEOUT = 5 * 60 * 1000; // 5 minutes max
   const timeoutId = setTimeout(() => {
-    console.warn(`PM Commission fetch timeout after ${PM_COMMISSION_TIMEOUT / 1000}s - aborting requests`);
-    pmCommissionController.abort();
-  }, PM_COMMISSION_TIMEOUT);
+    console.warn(`Financial data fetch timeout after ${FINANCE_TIMEOUT / 1000}s - aborting requests`);
+    financeController.abort();
+  }, FINANCE_TIMEOUT);
 
-  const pmCommissionFetches = reservationsArray.map((reservation) =>
+  const financeFetches = reservationsArray.map((reservation) =>
     limiter(async () => {
       try {
         const financeRes = await httpsRequest({
@@ -277,28 +277,41 @@ async function getHostawayData() {
           path: `/v1/financeCalculatedField/reservation/${reservation.id}?accountId=${HOSTAWAY_ACCOUNT_ID}`,
           method: 'GET',
           headers: { 'Authorization': `Bearer ${token}` },
-        }, null, 3, pmCommissionController.signal);
+        }, null, 3, financeController.signal);
 
-        const pmData = financeRes.body?.result?.find(f => f.formulaName === 'pmCommission');
-        return { reservationId: reservation.id, pmCommission: pmData?.formulaResult || 0 };
+        const result = financeRes.body?.result || [];
+        const accommodationFareData = result.find(f => f.formulaName === 'accommodationFare');
+        const pmCommissionData = result.find(f => f.formulaName === 'pmCommission');
+        const cleaningFeeData = result.find(f => f.formulaName === 'cleaningFee');
+
+        return {
+          reservationId: reservation.id,
+          accommodationFare: accommodationFareData?.formulaResult || 0,
+          pmCommission: pmCommissionData?.formulaResult || 0,
+          cleaningFee: cleaningFeeData?.formulaResult || 0,
+        };
       } catch (err) {
-        console.error(`Error fetching PM Commission for reservation ${reservation.id}: ${err.message}`);
-        return { reservationId: reservation.id, pmCommission: 0 };
+        console.error(`Error fetching financial data for reservation ${reservation.id}: ${err.message}`);
+        return { reservationId: reservation.id, accommodationFare: 0, pmCommission: 0, cleaningFee: 0 };
       }
     })
   );
 
   try {
-    const pmCommissionResults = await Promise.all(pmCommissionFetches);
+    const financeResults = await Promise.all(financeFetches);
     clearTimeout(timeoutId);
-    pmCommissionResults.forEach(result => {
-      pmCommissions[result.reservationId] = result.pmCommission;
+    financeResults.forEach(result => {
+      financialData[result.reservationId] = {
+        accommodationFare: result.accommodationFare,
+        pmCommission: result.pmCommission,
+        cleaningFee: result.cleaningFee,
+      };
     });
   } catch (err) {
     if (err.name === 'AbortError') {
-      console.warn('PM Commission fetch was aborted due to timeout');
+      console.warn('Financial data fetch was aborted due to timeout');
     } else {
-      console.error('PM Commission fetch error:', err.message);
+      console.error('Financial data fetch error:', err.message);
     }
   }
 
@@ -307,7 +320,7 @@ async function getHostawayData() {
     reservations: reservationsArray,
     listings: listingsArray,
     calendar: calendarData,
-    pmCommissions,
+    financialData,
     today,
   };
 }
@@ -402,8 +415,8 @@ function calculateTodayOccupancy(reservations, listings, today, calendarData) {
   };
 }
 
-// Calculate revenue for today (prorated by night)
-function calculateTodayRevenue(reservations, today, pmCommissions) {
+// Calculate revenue for today (fetched from Hostaway financial formulas, prorated by night)
+function calculateTodayRevenue(reservations, today, financialData) {
   console.log(`\n=== REVENUE CALCULATION DEBUG ===`);
   console.log(`Total reservations received: ${reservations.length}`);
 
@@ -430,19 +443,16 @@ function calculateTodayRevenue(reservations, today, pmCommissions) {
 
   filteredReservations.forEach(r => {
     const nights = getNightsInReservation(r);
-    const pmComm = pmCommissions[r.id] || 0;
+    const finance = financialData[r.id] || { accommodationFare: 0, pmCommission: 0, cleaningFee: 0 };
 
-    // Prorated accommodation fare per night
-    const farePerNight = ((r.totalPrice || 0) - (r.cleaningFee || 0) - pmComm) / nights;
-    accommodationFare += farePerNight;
+    // Prorate fetched values from Hostaway financial formulas per night
+    accommodationFare += (finance.accommodationFare || 0) / nights;
+    pmCommission += (finance.pmCommission || 0) / nights;
 
-    // Prorated PM commission per night
-    pmCommission += pmComm / nights;
-
-    // Cleaning fee only on check-in date
+    // Cleaning fee only on check-in date (not prorated, only if guest checks in today)
     const arrivalDate = new Date(r.arrivalDate).toISOString().split('T')[0];
     if (arrivalDate === today) {
-      cleaningFee += (r.cleaningFee || 0);
+      cleaningFee += (finance.cleaningFee || 0);
     }
   });
 
@@ -742,7 +752,7 @@ async function main() {
     const occupancy = calculateTodayOccupancy(data.reservations, data.listings, data.today, data.calendar);
 
     console.log('Calculating revenue...');
-    const revenue = calculateTodayRevenue(data.reservations, data.today, data.pmCommissions);
+    const revenue = calculateTodayRevenue(data.reservations, data.today, data.financialData);
 
     console.log('Calculating low occupancy alerts...');
     const { alerts: lowOccupancyAlerts, debugData } = calculateLowOccupancyAlerts(data.listings, data.today, data.calendar, data.reservations);
