@@ -1,0 +1,23 @@
+name: Diagnostic - Cleaning Fee
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: 'Date (YYYY-MM-DD)'
+        required: true
+        default: '2026-09-08'
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - env:
+          HOSTAWAY_ACCOUNT_ID: ${{ secrets.HOSTAWAY_ACCOUNT_ID }}
+          HOSTAWAY_API_KEY: ${{ secrets.HOSTAWAY_API_KEY }}
+          TARGET_DATE: ${{ inputs.target_date }}
+        run: node diagnose-cleaning-fee.js
