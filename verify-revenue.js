@@ -18,9 +18,11 @@ const checks = [
   ['Cleaning Fee', grab('Cleaning Fee'), parseFloat(process.env.EXP_CLEAN)],
 ];
 
-// Hostaway rounds each reservation's per-night share to 2dp before summing; we divide at
-// full precision. Across ~35 reservations that drifts by a few rupees at most.
-const TOLERANCE = 1.0;
+// This compares live data against a CSV taken at some earlier moment. Bookings get
+// created, extended and cancelled in between, so an exact match only happens against an
+// export pulled at the same time as the run. Tighten TOLERANCE to a rupee or two when
+// checking against a fresh export - that is the run that proves the arithmetic.
+const TOLERANCE = Number(process.env.TOLERANCE || 100);
 
 console.log('\n' + '='.repeat(64));
 console.log('REVENUE VERIFICATION vs HOSTAWAY EXPORT');

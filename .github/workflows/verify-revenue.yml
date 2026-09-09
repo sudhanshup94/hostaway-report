@@ -23,6 +23,10 @@ on:
         description: 'Cleaning Fee from the CSV export'
         required: true
         default: '4526.63'
+      tolerance:
+        description: 'Allowed rupee difference. Use 1 with a freshly-pulled export.'
+        required: false
+        default: '100'
 
 jobs:
   verify:
@@ -47,4 +51,5 @@ jobs:
           EXP_ACC: ${{ inputs.expected_accommodation }}
           EXP_PM: ${{ inputs.expected_pm_commission }}
           EXP_CLEAN: ${{ inputs.expected_cleaning }}
+          TOLERANCE: ${{ inputs.tolerance }}
         run: node verify-revenue.js report-output.txt
