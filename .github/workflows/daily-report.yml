@@ -3,7 +3,15 @@ name: Hostaway Daily Report
 on:
   schedule:
     - cron: '30 12 * * *'  # 12:30 UTC = 6:00 PM IST
-  workflow_dispatch:  # Allows manual trigger
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Print the report without emailing or sending WhatsApp'
+        type: boolean
+        default: false
+      report_date:
+        description: 'Report on a past date (YYYY-MM-DD). Blank = today IST.'
+        required: false
 
 jobs:
   report:
@@ -34,4 +42,6 @@ jobs:
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
           TWILIO_PHONE_NUMBER: ${{ secrets.TWILIO_PHONE_NUMBER }}
           WHATSAPP_RECIPIENT: ${{ secrets.WHATSAPP_RECIPIENT }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REPORT_DATE: ${{ inputs.report_date }}
         run: node hostaway-report.js
