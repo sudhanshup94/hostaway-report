@@ -287,14 +287,18 @@ async function getHostawayData() {
         };
 
         // Field names are case-sensitive and verified against the live API.
+        // totalGuestFees - not reservation.cleaningFee - is what Hostaway reports as the
+        // cleaning fee. Direct bookings carry a cleaningFee on the reservation but bill
+        // no guest fee, and the export shows zero for them.
         const accommodationFare = valueOf('AccommodationFare');
         const pmCommission = valueOf('pmCommission');
+        const cleaningFee = valueOf('totalGuestFees');
 
-        if (accommodationFare === null || pmCommission === null) {
+        if (accommodationFare === null || pmCommission === null || cleaningFee === null) {
           throw new Error(`missing finance fields (got: ${fields.map(f => f.formulaName).join(', ') || 'none'})`);
         }
 
-        return { reservationId: reservation.id, accommodationFare, pmCommission };
+        return { reservationId: reservation.id, accommodationFare, pmCommission, cleaningFee };
       } catch (err) {
         financeFailures.push({ id: reservation.id, guest: reservation.guestName, error: err.message });
         return null;
@@ -308,6 +312,7 @@ async function getHostawayData() {
       financialData[result.reservationId] = {
         accommodationFare: result.accommodationFare,
         pmCommission: result.pmCommission,
+        cleaningFee: result.cleaningFee,
       };
     }
   });
@@ -458,7 +463,7 @@ function calculateTodayRevenue(reservations, today, financialData) {
 
     accommodationFare += finance.accommodationFare / nights;
     pmCommission += finance.pmCommission / nights;
-    cleaningFee += (Number(r.cleaningFee) || 0) / nights;
+    cleaningFee += finance.cleaningFee / nights;
   });
 
   console.log(`Accommodation Fare: ${accommodationFare.toFixed(2)}`);
