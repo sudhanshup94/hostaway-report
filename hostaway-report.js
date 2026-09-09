@@ -22,8 +22,11 @@ const httpsAgent = new https.Agent({
   freeSocketTimeout: 30000,
 });
 
-// Get today's date in IST (Asia/Kolkata timezone)
+// Get today's date in IST (Asia/Kolkata timezone). REPORT_DATE overrides it so a past
+// day can be re-run and checked against a Hostaway export.
 function getTodayIST() {
+  if (process.env.REPORT_DATE) return process.env.REPORT_DATE;
+
   const istFormatter = new Intl.DateTimeFormat('en-US', {
     year: 'numeric',
     month: '2-digit',
@@ -257,19 +260,17 @@ async function getHostawayData() {
   const allListingReservations = await Promise.all(listingFetches);
   allReservations = allListingReservations.flat();
 
-  // Fetch financial data (accommodationFare, pmCommission, cleaningFee) for each reservation
   const reservationsArray = allReservations;
+
+  // Only reservations that actually earn revenue today need finance data. Fetching
+  // for every reservation in the account is tens of thousands of calls and never finishes.
+  const revenueReservations = getRevenueEligibleReservations(reservationsArray, today);
+  console.log(`✓ Fetching finance data for ${revenueReservations.length} reservations earning revenue on ${today} (of ${reservationsArray.length} total)`);
+
   const financialData = {};
+  const financeFailures = [];
 
-  // Use AbortController to cancel finance requests after timeout
-  const financeController = new AbortController();
-  const FINANCE_TIMEOUT = 5 * 60 * 1000; // 5 minutes max
-  const timeoutId = setTimeout(() => {
-    console.warn(`Financial data fetch timeout after ${FINANCE_TIMEOUT / 1000}s - aborting requests`);
-    financeController.abort();
-  }, FINANCE_TIMEOUT);
-
-  const financeFetches = reservationsArray.map((reservation) =>
+  const financeFetches = revenueReservations.map((reservation) =>
     limiter(async () => {
       try {
         const financeRes = await httpsRequest({
@@ -277,42 +278,45 @@ async function getHostawayData() {
           path: `/v1/financeCalculatedField/reservation/${reservation.id}?accountId=${HOSTAWAY_ACCOUNT_ID}`,
           method: 'GET',
           headers: { 'Authorization': `Bearer ${token}` },
-        }, null, 3, financeController.signal);
+        }, null, 3);
 
-        const result = financeRes.body?.result || [];
-        const accommodationFareData = result.find(f => f.formulaName === 'accommodationFare');
-        const pmCommissionData = result.find(f => f.formulaName === 'pmCommission');
-        const cleaningFeeData = result.find(f => f.formulaName === 'cleaningFee');
-
-        return {
-          reservationId: reservation.id,
-          accommodationFare: accommodationFareData?.formulaResult || 0,
-          pmCommission: pmCommissionData?.formulaResult || 0,
-          cleaningFee: cleaningFeeData?.formulaResult || 0,
+        const fields = financeRes.body?.result || [];
+        const valueOf = (name) => {
+          const field = fields.find(f => f.formulaName === name);
+          return field ? Number(field.formulaResult) || 0 : null;
         };
+
+        // Field names are case-sensitive and verified against the live API.
+        const accommodationFare = valueOf('AccommodationFare');
+        const pmCommission = valueOf('pmCommission');
+
+        if (accommodationFare === null || pmCommission === null) {
+          throw new Error(`missing finance fields (got: ${fields.map(f => f.formulaName).join(', ') || 'none'})`);
+        }
+
+        return { reservationId: reservation.id, accommodationFare, pmCommission };
       } catch (err) {
-        console.error(`Error fetching financial data for reservation ${reservation.id}: ${err.message}`);
-        return { reservationId: reservation.id, accommodationFare: 0, pmCommission: 0, cleaningFee: 0 };
+        financeFailures.push({ id: reservation.id, guest: reservation.guestName, error: err.message });
+        return null;
       }
     })
   );
 
-  try {
-    const financeResults = await Promise.all(financeFetches);
-    clearTimeout(timeoutId);
-    financeResults.forEach(result => {
+  const financeResults = await Promise.all(financeFetches);
+  financeResults.forEach(result => {
+    if (result) {
       financialData[result.reservationId] = {
         accommodationFare: result.accommodationFare,
         pmCommission: result.pmCommission,
-        cleaningFee: result.cleaningFee,
       };
-    });
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      console.warn('Financial data fetch was aborted due to timeout');
-    } else {
-      console.error('Financial data fetch error:', err.message);
     }
+  });
+
+  if (financeFailures.length > 0) {
+    console.error(`\n⚠️  FINANCE DATA INCOMPLETE: ${financeFailures.length}/${revenueReservations.length} reservations failed`);
+    financeFailures.forEach(f => console.error(`   - ${f.guest} (${f.id}): ${f.error}`));
+  } else {
+    console.log(`✓ Finance data complete for all ${revenueReservations.length} reservations`);
   }
 
   return {
@@ -321,6 +325,7 @@ async function getHostawayData() {
     listings: listingsArray,
     calendar: calendarData,
     financialData,
+    financeFailures,
     today,
   };
 }
@@ -357,6 +362,17 @@ function getNightsInReservation(reservation) {
   const departure = new Date(reservation.departureDate);
   const nights = Math.ceil((departure - arrival) / (1000 * 60 * 60 * 24));
   return Math.max(1, nights);
+}
+
+// The single definition of "this reservation earns revenue on this date". Used both to
+// decide which reservations need a finance lookup and to sum the day's revenue, so the
+// two can never drift apart.
+function getRevenueEligibleReservations(reservations, date) {
+  return reservations.filter(r =>
+    !EXCLUDED_LISTINGS.includes(r.listingMapId) &&
+    isConfirmedGuestReservation(r) &&
+    isReservationActiveOnDate(r, date)
+  );
 }
 
 // Calculate occupancy for today
@@ -415,56 +431,50 @@ function calculateTodayOccupancy(reservations, listings, today, calendarData) {
   };
 }
 
-// Calculate revenue for today (fetched from Hostaway financial formulas, prorated by night)
+// Revenue for a single day. Hostaway's own reservations report spreads every money
+// figure evenly across the nights of a stay and reports one night's share, so a stay
+// spanning the date contributes value/nights. Cleaning fee is spread the same way -
+// it is not billed in full on the arrival date.
 function calculateTodayRevenue(reservations, today, financialData) {
   console.log(`\n=== REVENUE CALCULATION DEBUG ===`);
   console.log(`Total reservations received: ${reservations.length}`);
 
-  const excludedByListing = reservations.filter(r => EXCLUDED_LISTINGS.includes(r.listingId));
-  console.log(`Excluded by listing: ${excludedByListing.length}`);
-
-  const notConfirmedGuest = reservations.filter(r => !EXCLUDED_LISTINGS.includes(r.listingId) && !isConfirmedGuestReservation(r));
-  console.log(`Not confirmed guest (status not in ['active', 'confirmed', 'new', 'modified']): ${notConfirmedGuest.length}`);
-  if (notConfirmedGuest.length > 0) {
-    notConfirmedGuest.forEach(r => {
-      console.log(`  - ${r.guestName}: status="${r.status}", listing="${r.listingMapId}"`);
-    });
-  }
-
-  const notActiveOnDate = reservations.filter(r => !EXCLUDED_LISTINGS.includes(r.listingId) && isConfirmedGuestReservation(r) && !isReservationActiveOnDate(r, today));
-  console.log(`Not active on ${today}: ${notActiveOnDate.length}`);
-
-  const filteredReservations = reservations.filter(r => !EXCLUDED_LISTINGS.includes(r.listingId) && isConfirmedGuestReservation(r) && isReservationActiveOnDate(r, today));
-  console.log(`Final filtered reservations for revenue: ${filteredReservations.length}`);
+  const filteredReservations = getRevenueEligibleReservations(reservations, today);
+  console.log(`Reservations earning revenue on ${today}: ${filteredReservations.length}`);
 
   let accommodationFare = 0;
   let cleaningFee = 0;
   let pmCommission = 0;
+  const missingFinance = [];
 
   filteredReservations.forEach(r => {
     const nights = getNightsInReservation(r);
-    const finance = financialData[r.id] || { accommodationFare: 0, pmCommission: 0, cleaningFee: 0 };
+    const finance = financialData[r.id];
 
-    // Prorate fetched values from Hostaway financial formulas per night
-    accommodationFare += (finance.accommodationFare || 0) / nights;
-    pmCommission += (finance.pmCommission || 0) / nights;
-
-    // Cleaning fee only on check-in date (not prorated, only if guest checks in today)
-    const arrivalDate = new Date(r.arrivalDate).toISOString().split('T')[0];
-    if (arrivalDate === today) {
-      cleaningFee += (finance.cleaningFee || 0);
+    if (!finance) {
+      missingFinance.push(r.guestName || r.id);
+      return;
     }
+
+    accommodationFare += finance.accommodationFare / nights;
+    pmCommission += finance.pmCommission / nights;
+    cleaningFee += (Number(r.cleaningFee) || 0) / nights;
   });
 
   console.log(`Accommodation Fare: ${accommodationFare.toFixed(2)}`);
   console.log(`PM Commission: ${pmCommission.toFixed(2)}`);
   console.log(`Cleaning Fee: ${cleaningFee.toFixed(2)}`);
+  if (missingFinance.length > 0) {
+    console.error(`⚠️  ${missingFinance.length} reservations excluded from revenue - no finance data: ${missingFinance.join(', ')}`);
+  }
   console.log(`=== END DEBUG ===\n`);
 
   return {
     accommodationFare: Math.max(0, accommodationFare),
     pmCommission: Math.max(0, pmCommission),
     cleaningFee: Math.max(0, cleaningFee),
+    reservationCount: filteredReservations.length,
+    missingFinanceCount: missingFinance.length,
   };
 }
 
@@ -580,9 +590,13 @@ function formatEmailReport(occupancy, revenue, lowOccupancyAlerts, today) {
   report += `Occupancy: ${occupancy.occupancyPercent}%\n\n`;
 
   report += `2. Revenue Today\n\n`;
+  if (revenue.missingFinanceCount > 0) {
+    report += `⚠️ INCOMPLETE: finance data missing for ${revenue.missingFinanceCount} of ${revenue.reservationCount} reservations. The figures below are understated.\n\n`;
+  }
   report += `Accommodation Fare: ₹${revenue.accommodationFare.toFixed(2)}\n`;
   report += `PM Commission: ₹${revenue.pmCommission.toFixed(2)}\n`;
-  report += `Cleaning Fee: ₹${revenue.cleaningFee.toFixed(2)}\n\n`;
+  report += `Cleaning Fee: ₹${revenue.cleaningFee.toFixed(2)}\n`;
+  report += `Based on ${revenue.reservationCount - revenue.missingFinanceCount} reservations earning revenue today.\n\n`;
 
   report += `3. Low Occupancy Alerts - Next 15 Days\n\n`;
   report += `This section shows properties with high sellable availability over the next 15 days where sales action may be required. Guest bookings, homeowner stays, maintenance blocks, and other calendar blocks are all treated as blocked/occupied because those dates are not available for sale.\n\n`;
@@ -615,6 +629,9 @@ function formatWhatsAppReport(occupancy, revenue, lowOccupancyAlerts) {
   report += `Occupancy: ${occupancy.occupancyPercent}%\n\n`;
 
   report += `Revenue Today:\n`;
+  if (revenue.missingFinanceCount > 0) {
+    report += `⚠️ Incomplete - ${revenue.missingFinanceCount}/${revenue.reservationCount} reservations missing finance data\n`;
+  }
   report += `Accommodation: ₹${revenue.accommodationFare.toFixed(0)}\n`;
   report += `PM Commission: ₹${revenue.pmCommission.toFixed(0)}\n`;
   report += `Cleaning: ₹${revenue.cleaningFee.toFixed(0)}\n\n`;
@@ -792,6 +809,11 @@ async function main() {
     const emailReport = formatEmailReport(occupancy, revenue, lowOccupancyAlerts, data.today);
     console.log('\n📧 EMAIL REPORT:\n');
     console.log(emailReport);
+
+    if (process.env.DRY_RUN === 'true') {
+      console.log('\n🔍 DRY_RUN - report printed above, nothing sent.');
+      return;
+    }
 
     console.log('\nSending via Resend...');
     await sendViaGmail(emailReport);

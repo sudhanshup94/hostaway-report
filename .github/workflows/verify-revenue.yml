@@ -1,0 +1,50 @@
+name: Verify Revenue Against Hostaway Export
+
+# Re-runs the real report for a past date without sending anything, and checks the
+# revenue totals against the numbers from a Hostaway reservations CSV export.
+# Defaults to 2026-09-08, whose export was reconciled by hand.
+
+on:
+  workflow_dispatch:
+    inputs:
+      report_date:
+        description: 'Date to reproduce (YYYY-MM-DD)'
+        required: true
+        default: '2026-09-08'
+      expected_accommodation:
+        description: 'Accommodation Fare from the CSV export'
+        required: true
+        default: '250895.22'
+      expected_pm_commission:
+        description: 'PM Commission from the CSV export'
+        required: true
+        default: '53279.89'
+      expected_cleaning:
+        description: 'Cleaning Fee from the CSV export'
+        required: true
+        default: '4526.63'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - run: npm install
+
+      - name: Run report (dry run)
+        env:
+          HOSTAWAY_ACCOUNT_ID: ${{ secrets.HOSTAWAY_ACCOUNT_ID }}
+          HOSTAWAY_API_KEY: ${{ secrets.HOSTAWAY_API_KEY }}
+          REPORT_DATE: ${{ inputs.report_date }}
+          DRY_RUN: 'true'
+        run: node hostaway-report.js 2>&1 | tee report-output.txt
+
+      - name: Compare against export
+        env:
+          EXP_ACC: ${{ inputs.expected_accommodation }}
+          EXP_PM: ${{ inputs.expected_pm_commission }}
+          EXP_CLEAN: ${{ inputs.expected_cleaning }}
+        run: node verify-revenue.js report-output.txt
