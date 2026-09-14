@@ -1,7 +1,7 @@
 {
   "name": "hostaway-report",
   "version": "1.0.0",
-  "description": "Daily Hostaway reports via email and WhatsApp",
+  "description": "Daily Hostaway occupancy and revenue reports via email",
   "main": "hostaway-report.js",
   "scripts": {
     "start": "node hostaway-report.js"

@@ -10,7 +10,6 @@ const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const EMAIL_FROM = process.env.EMAIL_FROM;
 const EMAIL_TO = process.env.EMAIL_TO;
-const WHATSAPP_RECIPIENT = process.env.WHATSAPP_RECIPIENT;
 const EXCLUDED_LISTINGS = [488785];
 
 // Connection pool with limited concurrent connections to avoid timeouts
@@ -622,44 +621,6 @@ function formatEmailReport(occupancy, revenue, lowOccupancyAlerts, today) {
   return report;
 }
 
-// Format WhatsApp report
-function formatWhatsAppReport(occupancy, revenue, lowOccupancyAlerts) {
-  let report = `Hostaway Daily Report\n\n`;
-
-  report += `Occupancy Today:\n`;
-  report += `Total: ${occupancy.totalUnits}\n`;
-  report += `Occupied: ${occupancy.occupiedUnits}\n`;
-  report += `Unavailable: ${occupancy.unavailableUnits}\n`;
-  report += `Sellable: ${occupancy.sellableUnits}\n`;
-  report += `Occupancy: ${occupancy.occupancyPercent}%\n\n`;
-
-  report += `Revenue Today:\n`;
-  if (revenue.missingFinanceCount > 0) {
-    report += `⚠️ Incomplete - ${revenue.missingFinanceCount}/${revenue.reservationCount} reservations missing finance data\n`;
-  }
-  report += `Accommodation: ₹${revenue.accommodationFare.toFixed(0)}\n`;
-  report += `PM Commission: ₹${revenue.pmCommission.toFixed(0)}\n`;
-  report += `Cleaning: ₹${revenue.cleaningFee.toFixed(0)}\n\n`;
-
-  const villas = lowOccupancyAlerts.filter(a => a.propertyType === 'Villa');
-  const apartments = lowOccupancyAlerts.filter(a => a.propertyType === 'Apartment');
-
-  report += `Low Occupancy Alerts:\n`;
-  report += `Villas below 30%: ${villas.length}\n`;
-  report += `Apartments below 50%: ${apartments.length}\n\n`;
-
-  const topAlerts = lowOccupancyAlerts.sort((a, b) => parseFloat(a.blockedOccupancyPercent) - parseFloat(b.blockedOccupancyPercent)).slice(0, 5);
-
-  if (topAlerts.length > 0) {
-    report += `Top 5 Lowest Blocked/Occupied:\n\n`;
-    topAlerts.forEach((alert, idx) => {
-      report += `${idx + 1}. ${alert.internalListingName} - ${alert.blockedDays}/15 blocked - ${alert.availableDays}/15 available - ${alert.blockedOccupancyPercent}%\n`;
-    });
-  }
-
-  return report;
-}
-
 // Print debug table to console
 function printDebugTable(debugData) {
   console.log('\n📋 DEBUG DATA - Occupancy Details for All Properties\n');
@@ -729,41 +690,6 @@ async function sendViaGmail(report) {
   }
 }
 
-async function sendViaWhatsApp(report) {
-  return new Promise((resolve) => {
-    const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
-    const fromNum = process.env.TWILIO_PHONE_NUMBER.replace(/\D/g, '');
-    const recipientNum = WHATSAPP_RECIPIENT.replace(/\D/g, '');
-    const body = `From=whatsapp:%2B${fromNum}&To=whatsapp:%2B${recipientNum}&Body=${encodeURIComponent(report)}`;
-
-    const req = https.request({
-      hostname: 'api.twilio.com',
-      path: `/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Messages.json`,
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(body),
-      },
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        const success = res.statusCode === 201;
-        console.log('WhatsApp sent:', success ? 'Success' : `Failed (${res.statusCode})`);
-        resolve(success);
-      });
-    });
-
-    req.on('error', (e) => {
-      console.error('WhatsApp error:', e.message);
-      resolve(false);
-    });
-
-    req.write(body);
-    req.end();
-  });
-}
 
 async function main() {
   try {
@@ -810,7 +736,7 @@ async function main() {
     // Print debug table
     printDebugTable(debugData.slice(0, 5)); // Show first 5 for brevity
 
-    // Format and send reports
+    // Format and send the report
     const emailReport = formatEmailReport(occupancy, revenue, lowOccupancyAlerts, data.today);
     console.log('\n📧 EMAIL REPORT:\n');
     console.log(emailReport);
@@ -822,10 +748,6 @@ async function main() {
 
     console.log('\nSending via Resend...');
     await sendViaGmail(emailReport);
-
-    console.log('Sending via WhatsApp...');
-    const whatsappReport = formatWhatsAppReport(occupancy, revenue, lowOccupancyAlerts);
-    await sendViaWhatsApp(whatsappReport);
 
     console.log('\n✅ Report sent successfully!');
   } catch (error) {
