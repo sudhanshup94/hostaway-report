@@ -23,20 +23,44 @@ const httpsAgent = new https.Agent({
 
 // Get today's date in IST (Asia/Kolkata timezone). REPORT_DATE overrides it so a past
 // day can be re-run and checked against a Hostaway export.
-function getTodayIST() {
-  if (process.env.REPORT_DATE) return process.env.REPORT_DATE;
-
-  const istFormatter = new Intl.DateTimeFormat('en-US', {
+function istDate(instant) {
+  const parts = new Intl.DateTimeFormat('en-US', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     timeZone: 'Asia/Kolkata'
-  });
-  const parts = istFormatter.formatToParts(new Date());
+  }).formatToParts(instant);
   const year = parts.find(p => p.type === 'year').value;
   const month = parts.find(p => p.type === 'month').value;
   const day = parts.find(p => p.type === 'day').value;
   return `${year}-${month}-${day}`;
+}
+
+// Must match the cron in .github/workflows/daily-report.yml.
+const SCHEDULE_UTC_HOUR = 12;
+const SCHEDULE_UTC_MINUTE = 30;
+
+// The instant the current run was *meant* to start. GitHub routinely starts scheduled
+// runs hours late, and a run pushed past IST midnight would otherwise report the
+// following day: in October 2026 that silently skipped the 1st, 5th, 12th, 19th, 26th
+// and 29th while sending the 2nd, 6th, 13th, 20th, 27th and 30th twice. Anchoring to
+// the slot keeps the date right however late the run begins.
+function getScheduledSlot(now) {
+  const slot = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+    SCHEDULE_UTC_HOUR, SCHEDULE_UTC_MINUTE, 0, 0
+  ));
+  if (now.getTime() < slot.getTime()) slot.setUTCDate(slot.getUTCDate() - 1);
+  return slot;
+}
+
+function getTodayIST() {
+  if (process.env.REPORT_DATE) return process.env.REPORT_DATE;
+
+  const now = new Date();
+  // Manual runs report the day they are triggered; scheduled runs report their slot.
+  const anchor = process.env.GITHUB_EVENT_NAME === 'schedule' ? getScheduledSlot(now) : now;
+  return istDate(anchor);
 }
 
 // Get a date N days from today in IST
