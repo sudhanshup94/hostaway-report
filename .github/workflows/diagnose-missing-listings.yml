@@ -1,0 +1,20 @@
+name: Diagnostic - Missing Listings
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'departureDateFrom for the scan (YYYY-MM-DD)'
+        required: false
+        default: '2026-09-01'
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with: { node-version: '18' }
+      - env:
+          HOSTAWAY_ACCOUNT_ID: ${{ secrets.HOSTAWAY_ACCOUNT_ID }}
+          HOSTAWAY_API_KEY: ${{ secrets.HOSTAWAY_API_KEY }}
+          SINCE: ${{ inputs.since }}
+        run: node diagnose-missing-listings.js
