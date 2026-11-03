@@ -23,44 +23,20 @@ const httpsAgent = new https.Agent({
 
 // Get today's date in IST (Asia/Kolkata timezone). REPORT_DATE overrides it so a past
 // day can be re-run and checked against a Hostaway export.
-function istDate(instant) {
-  const parts = new Intl.DateTimeFormat('en-US', {
+function getTodayIST() {
+  if (process.env.REPORT_DATE) return process.env.REPORT_DATE;
+
+  const istFormatter = new Intl.DateTimeFormat('en-US', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     timeZone: 'Asia/Kolkata'
-  }).formatToParts(instant);
+  });
+  const parts = istFormatter.formatToParts(new Date());
   const year = parts.find(p => p.type === 'year').value;
   const month = parts.find(p => p.type === 'month').value;
   const day = parts.find(p => p.type === 'day').value;
   return `${year}-${month}-${day}`;
-}
-
-// Must match the cron in .github/workflows/daily-report.yml.
-const SCHEDULE_UTC_HOUR = 12;
-const SCHEDULE_UTC_MINUTE = 30;
-
-// The instant the current run was *meant* to start. GitHub routinely starts scheduled
-// runs hours late, and a run pushed past IST midnight would otherwise report the
-// following day: in October 2026 that silently skipped the 1st, 5th, 12th, 19th, 26th
-// and 29th while sending the 2nd, 6th, 13th, 20th, 27th and 30th twice. Anchoring to
-// the slot keeps the date right however late the run begins.
-function getScheduledSlot(now) {
-  const slot = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
-    SCHEDULE_UTC_HOUR, SCHEDULE_UTC_MINUTE, 0, 0
-  ));
-  if (now.getTime() < slot.getTime()) slot.setUTCDate(slot.getUTCDate() - 1);
-  return slot;
-}
-
-function getTodayIST() {
-  if (process.env.REPORT_DATE) return process.env.REPORT_DATE;
-
-  const now = new Date();
-  // Manual runs report the day they are triggered; scheduled runs report their slot.
-  const anchor = process.env.GITHUB_EVENT_NAME === 'schedule' ? getScheduledSlot(now) : now;
-  return istDate(anchor);
 }
 
 // Get a date N days from today in IST
@@ -69,6 +45,73 @@ function getDateNDaysFromTodayIST(n) {
   const date = new Date(today);
   date.setDate(date.getDate() + n);
   return date.toISOString().split('T')[0];
+}
+
+// --- Calendar-month helpers (IST). All dates are 'YYYY-MM-DD' strings, compared
+// lexicographically, matching the convention the rest of the report already uses.
+
+function monthOf(dateStr) {
+  return dateStr.slice(0, 7);
+}
+
+function addMonths(ym, n) {
+  let [year, month] = ym.split('-').map(Number);
+  month += n;
+  year += Math.floor((month - 1) / 12);
+  month = ((month - 1) % 12 + 12) % 12 + 1;
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+function monthFirstDay(ym) {
+  return `${ym}-01`;
+}
+
+function monthLastDay(ym) {
+  const [year, month] = ym.split('-').map(Number);
+  // Day 0 of the following month is the last day of this one.
+  const day = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return `${ym}-${String(day).padStart(2, '0')}`;
+}
+
+function addDays(dateStr, n) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().split('T')[0];
+}
+
+// Every date from `start` to `end`, both inclusive.
+function eachDate(start, end) {
+  const out = [];
+  for (let d = start; d <= end; d = addDays(d, 1)) out.push(d);
+  return out;
+}
+
+// Hostaway stamps reservation timestamps in UTC as 'YYYY-MM-DD HH:MM:SS' (verified
+// against the live API: the newest records sit behind the UTC clock, and would be
+// hours in the future if read as IST). The report's 18:00 IST cutoff is 12:30 UTC.
+const IST_OFFSET_MINUTES = 330;
+
+function istWallClockToUTC(dateStr, hour, minute) {
+  const utcMs = Date.UTC(
+    Number(dateStr.slice(0, 4)), Number(dateStr.slice(5, 7)) - 1, Number(dateStr.slice(8, 10)),
+    hour, minute, 0
+  ) - IST_OFFSET_MINUTES * 60 * 1000;
+  return new Date(utcMs);
+}
+
+function parseHostawayTimestamp(value) {
+  if (!value) return null;
+  const d = new Date(String(value).replace(' ', 'T') + 'Z');
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+// When the booking was made. reservationDate is the booking moment; insertedOn is when
+// Hostaway's row was written, consistently a few seconds later, so it would misattribute
+// a booking whose channel sync straddled the cutoff. latestActivityOn is modification
+// time and must never be used here.
+function getBookingCreatedAt(reservation) {
+  return parseHostawayTimestamp(reservation.reservationDate)
+    || parseHostawayTimestamp(reservation.insertedOn);
 }
 
 // Limit concurrent promises to avoid overwhelming the API
@@ -213,6 +256,22 @@ async function getHostawayData() {
   const today = getTodayIST();
   const endDateStr = getDateNDaysFromTodayIST(15);
 
+  // The portfolio section needs the whole current and next calendar month. That window
+  // always contains today..today+15 (today+15 can never pass the 15th of next month), so
+  // one widened calendar call per listing serves both reports.
+  const currentMonth = monthOf(today);
+  const nextMonth = addMonths(currentMonth, 1);
+  const months = {
+    currentMonth,
+    nextMonth,
+    currentStart: monthFirstDay(currentMonth),
+    currentEnd: monthLastDay(currentMonth),
+    nextStart: monthFirstDay(nextMonth),
+    nextEnd: monthLastDay(nextMonth),
+  };
+  const calendarStart = months.currentStart;
+  const calendarEnd = months.nextEnd;
+
   // Get listings with pagination (Hostaway default limit is 100, need to fetch all)
   console.log('Fetching all listings (with pagination)...');
   let allListings = [];
@@ -253,25 +312,39 @@ async function getHostawayData() {
   const listingFetches = filteredListings.map((listing) =>
     limiter(async () => {
       try {
-        // Fetch calendar and reservations in parallel (they're independent)
-        const [cal, listingResRes] = await Promise.all([
+        // Fetch calendar and reservations in parallel (they're independent).
+        // Reservations start from the current month's first day rather than today, so the
+        // portfolio section sees bookings that already departed earlier this month and
+        // bookings made this month for far-future stays. Today's figures filter to today
+        // downstream and are unaffected by the wider set.
+        const [cal, listingReservations] = await Promise.all([
           httpsRequest({
             hostname: 'api.hostaway.com',
-            path: `/v1/listings/${listing.id}/calendar?accountId=${HOSTAWAY_ACCOUNT_ID}&startDate=${today}&endDate=${endDateStr}`,
+            path: `/v1/listings/${listing.id}/calendar?accountId=${HOSTAWAY_ACCOUNT_ID}&startDate=${calendarStart}&endDate=${calendarEnd}`,
             method: 'GET',
             headers: { 'Authorization': `Bearer ${token}` },
           }),
-          httpsRequest({
-            hostname: 'api.hostaway.com',
-            path: `/v1/reservations?accountId=${HOSTAWAY_ACCOUNT_ID}&listingId=${listing.id}&status=active,confirmed,new,modified&departureDateFrom=${today}&limit=500`,
-            method: 'GET',
-            headers: { 'Authorization': `Bearer ${token}` },
-          })
+          (async () => {
+            const collected = [];
+            const pageSize = 500;
+            for (let pageOffset = 0; ; pageOffset += pageSize) {
+              const res = await httpsRequest({
+                hostname: 'api.hostaway.com',
+                path: `/v1/reservations?accountId=${HOSTAWAY_ACCOUNT_ID}&listingId=${listing.id}&status=active,confirmed,new,modified&departureDateFrom=${calendarStart}&limit=${pageSize}&offset=${pageOffset}`,
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${token}` },
+              });
+              const batch = res.body?.result || [];
+              collected.push(...batch);
+              if (batch.length < pageSize) break;
+            }
+            return collected;
+          })(),
         ]);
 
         calendarData[listing.id] = cal.body?.result || [];
 
-        return listingResRes.body?.result || [];
+        return listingReservations;
       } catch (err) {
         console.error(`Error fetching data for listing ${listing.id}: ${err.message}`);
         return [];
@@ -284,16 +357,19 @@ async function getHostawayData() {
   allReservations = allListingReservations.flat();
 
   const reservationsArray = allReservations;
+  console.log(`✓ Fetched ${reservationsArray.length} reservations across ${filteredListings.length} listings (departure from ${calendarStart})`);
 
-  // Only reservations that actually earn revenue today need finance data. Fetching
-  // for every reservation in the account is tens of thousands of calls and never finishes.
-  const revenueReservations = getRevenueEligibleReservations(reservationsArray, today);
-  console.log(`✓ Fetching finance data for ${revenueReservations.length} reservations earning revenue on ${today} (of ${reservationsArray.length} total)`);
+  // Finance is fetched for the union of everything the two reports need, and nothing
+  // else. Fetching for every reservation in the account is tens of thousands of calls
+  // and never finishes.
+  const pickupWindow = getPickupWindow(today);
+  const financeCandidates = collectFinanceCandidates(reservationsArray, today, months, pickupWindow);
+  console.log(`✓ Fetching finance data for ${financeCandidates.length} reservations (of ${reservationsArray.length} fetched)`);
 
   const financialData = {};
   const financeFailures = [];
 
-  const financeFetches = revenueReservations.map((reservation) =>
+  const financeFetches = financeCandidates.map((reservation) =>
     limiter(async () => {
       try {
         const financeRes = await httpsRequest({
@@ -316,12 +392,13 @@ async function getHostawayData() {
         const accommodationFare = valueOf('AccommodationFare');
         const pmCommission = valueOf('pmCommission');
         const cleaningFee = valueOf('totalGuestFees');
+        const channelFee = valueOf('ChannelFee');
 
-        if (accommodationFare === null || pmCommission === null || cleaningFee === null) {
+        if (accommodationFare === null || pmCommission === null || cleaningFee === null || channelFee === null) {
           throw new Error(`missing finance fields (got: ${fields.map(f => f.formulaName).join(', ') || 'none'})`);
         }
 
-        return { reservationId: reservation.id, accommodationFare, pmCommission, cleaningFee };
+        return { reservationId: reservation.id, accommodationFare, pmCommission, cleaningFee, channelFee };
       } catch (err) {
         financeFailures.push({ id: reservation.id, guest: reservation.guestName, error: err.message });
         return null;
@@ -336,15 +413,16 @@ async function getHostawayData() {
         accommodationFare: result.accommodationFare,
         pmCommission: result.pmCommission,
         cleaningFee: result.cleaningFee,
+        channelFee: result.channelFee,
       };
     }
   });
 
   if (financeFailures.length > 0) {
-    console.error(`\n⚠️  FINANCE DATA INCOMPLETE: ${financeFailures.length}/${revenueReservations.length} reservations failed`);
+    console.error(`\n⚠️  FINANCE DATA INCOMPLETE: ${financeFailures.length}/${financeCandidates.length} reservations failed`);
     financeFailures.forEach(f => console.error(`   - ${f.guest} (${f.id}): ${f.error}`));
   } else {
-    console.log(`✓ Finance data complete for all ${revenueReservations.length} reservations`);
+    console.log(`✓ Finance data complete for all ${financeCandidates.length} reservations`);
   }
 
   return {
@@ -354,6 +432,9 @@ async function getHostawayData() {
     calendar: calendarData,
     financialData,
     financeFailures,
+    financeCandidateCount: financeCandidates.length,
+    months,
+    pickupWindow,
     today,
   };
 }
@@ -401,6 +482,198 @@ function getRevenueEligibleReservations(reservations, date) {
     isConfirmedGuestReservation(r) &&
     isReservationActiveOnDate(r, date)
   );
+}
+
+// --- Portfolio report -------------------------------------------------------------
+
+// The pickup window runs between consecutive 18:00 IST report cutoffs: start inclusive,
+// end exclusive. For a historical REPORT_DATE this is that date's cutoff and the one
+// before it, so a re-run reproduces the same window.
+function getPickupWindow(reportDate) {
+  return {
+    start: istWallClockToUTC(addDays(reportDate, -1), 18, 0),
+    end: istWallClockToUTC(reportDate, 18, 0),
+  };
+}
+
+function isEligibleGuestReservation(reservation) {
+  return !EXCLUDED_LISTINGS.includes(reservation.listingMapId)
+    && isConfirmedGuestReservation(reservation)
+    && !isHomeownerReservation(reservation);
+}
+
+function overlapsRange(reservation, start, end) {
+  const arrival = new Date(reservation.arrivalDate).toISOString().split('T')[0];
+  const departure = new Date(reservation.departureDate).toISOString().split('T')[0];
+  return arrival <= end && departure > start;
+}
+
+function createdWithin(reservation, start, end) {
+  const createdAt = getBookingCreatedAt(reservation);
+  return createdAt !== null && createdAt >= start && createdAt < end;
+}
+
+// Everything either report needs finance data for, de-duplicated. Sales from Current
+// Month counts bookings made this month whatever their stay dates, so month-overlap
+// alone is not enough.
+function collectFinanceCandidates(reservations, today, months, pickupWindow) {
+  const monthToDateStart = istWallClockToUTC(months.currentStart, 0, 0);
+  const byId = new Map();
+
+  for (const r of reservations) {
+    if (!isEligibleGuestReservation(r)) continue;
+
+    const needed =
+      overlapsRange(r, months.currentStart, months.currentEnd) ||
+      overlapsRange(r, months.nextStart, months.nextEnd) ||
+      isReservationActiveOnDate(r, today) ||
+      createdWithin(r, pickupWindow.start, pickupWindow.end) ||
+      createdWithin(r, monthToDateStart, pickupWindow.end);
+
+    if (needed) byId.set(r.id, r);
+  }
+
+  return [...byId.values()];
+}
+
+// Nights of this stay falling in each bucket. A stay occupies arrival..departure-1;
+// checkout day earns nothing.
+function bucketNights(reservation, months) {
+  const arrival = new Date(reservation.arrivalDate).toISOString().split('T')[0];
+  const departure = new Date(reservation.departureDate).toISOString().split('T')[0];
+  const buckets = { currentMonth: 0, nextMonth: 0, futureMonths: 0 };
+
+  for (let d = arrival; d < departure; d = addDays(d, 1)) {
+    if (d >= months.currentStart && d <= months.currentEnd) buckets.currentMonth++;
+    else if (d >= months.nextStart && d <= months.nextEnd) buckets.nextMonth++;
+    else if (d > months.nextEnd) buckets.futureMonths++;
+  }
+
+  return buckets;
+}
+
+// Guest-booked and sellable nights per month, read from the calendar so owner stays and
+// blocks are handled the same way the daily occupancy figure handles them.
+function calculateMonthOccupancy(listings, reservations, calendarData, start, end) {
+  const filteredListings = listings.filter(l => !EXCLUDED_LISTINGS.includes(l.id));
+  const dates = eachDate(start, end);
+
+  const byListing = new Map();
+  for (const r of reservations) {
+    if (!isEligibleGuestReservation(r)) continue;
+    if (!byListing.has(r.listingMapId)) byListing.set(r.listingMapId, []);
+    byListing.get(r.listingMapId).push(r);
+  }
+
+  let guestBookedNights = 0;
+  let unavailableNights = 0;
+
+  for (const listing of filteredListings) {
+    const calendar = calendarData[listing.id] || [];
+    const byDate = new Map(calendar.map(c => [c.date, c]));
+    const listingReservations = byListing.get(listing.id) || [];
+
+    for (const date of dates) {
+      const entry = byDate.get(date);
+      if (!entry) continue;
+
+      if (entry.status === 'reserved' && entry.countReservedUnits > 0) {
+        const match = listingReservations.find(r => isReservationActiveOnDate(r, date));
+        if (match) guestBookedNights++;
+        else unavailableNights++;
+      } else if (entry.status !== 'available' && entry.status !== 'open') {
+        unavailableNights++;
+      } else if (entry.countBlockedUnits > 0 || entry.isAvailable === false || entry.isAvailable === 0) {
+        unavailableNights++;
+      }
+    }
+  }
+
+  const totalListingNights = filteredListings.length * dates.length;
+  const sellableNights = totalListingNights - unavailableNights;
+  const occupancyPercent = sellableNights > 0 ? (guestBookedNights / sellableNights) * 100 : 0;
+
+  return { guestBookedNights, unavailableNights, sellableNights, totalListingNights, occupancyPercent };
+}
+
+function calculatePortfolioReport(data) {
+  const { reservations, listings, calendar, financialData, months, pickupWindow, today } = data;
+  const monthToDateStart = istWallClockToUTC(months.currentStart, 0, 0);
+
+  const zeroBuckets = () => ({ currentMonth: 0, nextMonth: 0, futureMonths: 0 });
+  const totals = {
+    pickupNights: zeroBuckets(),
+    pickupRevenue: zeroBuckets(),
+    revenue: zeroBuckets(),
+    cleaning: zeroBuckets(),
+    channelFee: zeroBuckets(),
+    margin: zeroBuckets(),
+  };
+  let salesFromCurrentMonth = 0;
+
+  const missingFinance = [];
+  const counts = { eligible: 0, monthBuckets: 0, pickup: 0, salesMTD: 0 };
+
+  for (const r of reservations) {
+    if (!isEligibleGuestReservation(r)) continue;
+    counts.eligible++;
+
+    const inMonths = overlapsRange(r, months.currentStart, months.currentEnd)
+      || overlapsRange(r, months.nextStart, months.nextEnd);
+    const inPickup = createdWithin(r, pickupWindow.start, pickupWindow.end);
+    const inSales = createdWithin(r, monthToDateStart, pickupWindow.end);
+    if (!inMonths && !inPickup && !inSales) continue;
+
+    const finance = financialData[r.id];
+    if (!finance) {
+      missingFinance.push({ id: r.id, guest: r.guestName });
+      continue;
+    }
+
+    const nights = getNightsInReservation(r);
+    const buckets = bucketNights(r, months);
+    const perNight = (value) => value / nights;
+
+    if (inMonths) {
+      counts.monthBuckets++;
+      for (const key of ['currentMonth', 'nextMonth']) {
+        totals.revenue[key] += perNight(finance.accommodationFare) * buckets[key];
+        totals.cleaning[key] += perNight(finance.cleaningFee) * buckets[key];
+        totals.channelFee[key] += perNight(finance.channelFee) * buckets[key];
+        totals.margin[key] += perNight(finance.pmCommission) * buckets[key];
+      }
+    }
+
+    if (inPickup) {
+      counts.pickup++;
+      for (const key of ['currentMonth', 'nextMonth', 'futureMonths']) {
+        totals.pickupNights[key] += buckets[key];
+        totals.pickupRevenue[key] += perNight(finance.accommodationFare) * buckets[key];
+      }
+    }
+
+    if (inSales) {
+      counts.salesMTD++;
+      // Full fare on the booking, not pro-rated - this measures sales made, not stays.
+      salesFromCurrentMonth += finance.accommodationFare;
+    }
+  }
+
+  const occupancyCurrent = calculateMonthOccupancy(listings, reservations, calendar, months.currentStart, months.currentEnd);
+  const occupancyNext = calculateMonthOccupancy(listings, reservations, calendar, months.nextStart, months.nextEnd);
+
+  return {
+    today,
+    months,
+    pickupWindow,
+    ...totals,
+    salesFromCurrentMonth,
+    occupancyCurrent,
+    occupancyNext,
+    missingFinanceCount: missingFinance.length,
+    missingFinance,
+    counts,
+  };
 }
 
 // Calculate occupancy for today
@@ -645,6 +918,88 @@ function formatEmailReport(occupancy, revenue, lowOccupancyAlerts, today) {
   return report;
 }
 
+function formatPortfolioSection(portfolio) {
+  const money = (v) => `₹${v.toFixed(2)}`;
+  const nights = (v) => String(Math.round(v));
+  const pct = (v) => `${v.toFixed(1)}%`;
+  const monthName = (ym) => new Date(ym + '-01T00:00:00Z')
+    .toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+  const p = portfolio;
+  let out = `\nPORTFOLIO PERFORMANCE REPORT — ${p.today}\n\n`;
+  out += `Date: ${p.today} IST\n`;
+  out += `Current month (FTM): ${monthName(p.months.currentMonth)} (${p.months.currentStart} to ${p.months.currentEnd})\n`;
+  out += `Next month: ${monthName(p.months.nextMonth)} (${p.months.nextStart} to ${p.months.nextEnd})\n\n`;
+
+  if (p.missingFinanceCount > 0) {
+    out += `⚠️ INCOMPLETE: finance data missing for ${p.missingFinanceCount} reservations. Figures below are understated.\n\n`;
+  }
+
+  out += `Pickup Nights FTM: ${nights(p.pickupNights.currentMonth)}\n`;
+  out += `Pickup Nights Next Month: ${nights(p.pickupNights.nextMonth)}\n`;
+  out += `Pickup Nights Future Months: ${nights(p.pickupNights.futureMonths)}\n\n`;
+
+  out += `Pickup Revenue FTM: ${money(p.pickupRevenue.currentMonth)}\n`;
+  out += `Pickup Revenue Next Month: ${money(p.pickupRevenue.nextMonth)}\n`;
+  out += `Pickup Revenue Future Months: ${money(p.pickupRevenue.futureMonths)}\n\n`;
+
+  out += `Occupancy FTM: ${pct(p.occupancyCurrent.occupancyPercent)}\n`;
+  out += `Occupancy Next Month: ${pct(p.occupancyNext.occupancyPercent)}\n\n`;
+
+  out += `Total Revenue FTM: ${money(p.revenue.currentMonth)}\n`;
+  out += `Total Revenue Next Month: ${money(p.revenue.nextMonth)}\n\n`;
+
+  out += `Cleaning Income FTM: ${money(p.cleaning.currentMonth)}\n`;
+  out += `Cleaning Income Next Month: ${money(p.cleaning.nextMonth)}\n\n`;
+
+  out += `Channel Fee FTM: ${money(p.channelFee.currentMonth)}\n`;
+  out += `Channel Fee Next Month: ${money(p.channelFee.nextMonth)}\n\n`;
+
+  out += `Margin FTM: ${money(p.margin.currentMonth)}\n`;
+  out += `Margin Next Month: ${money(p.margin.nextMonth)}\n\n`;
+
+  out += `Sales from Current Month: ${money(p.salesFromCurrentMonth)}\n\n`;
+
+  out += `Pickup window: ${p.pickupWindow.start.toISOString().slice(0, 16).replace('T', ' ')} to `;
+  out += `${p.pickupWindow.end.toISOString().slice(0, 16).replace('T', ' ')} UTC (18:00 IST to 18:00 IST).\n`;
+  out += `Occupancy is a point-in-time position from the live calendar at run time; FTM covers the whole month including elapsed days.\n`;
+
+  return out;
+}
+
+function printPortfolioDebug(p) {
+  console.log('\n=== PORTFOLIO DEBUG ===');
+  console.log(`Report date (IST)      : ${p.today}`);
+  console.log(`Current month          : ${p.months.currentStart} .. ${p.months.currentEnd}`);
+  console.log(`Next month             : ${p.months.nextStart} .. ${p.months.nextEnd}`);
+  console.log(`Future months          : after ${p.months.nextEnd}`);
+  console.log(`Pickup window (UTC)    : ${p.pickupWindow.start.toISOString()} -> ${p.pickupWindow.end.toISOString()}`);
+  console.log(`Booking-created field  : reservationDate (fallback insertedOn), read as UTC`);
+  console.log(`\nReservation counts:`);
+  console.log(`  eligible guest reservations : ${p.counts.eligible}`);
+  console.log(`  contributing to month totals: ${p.counts.monthBuckets}`);
+  console.log(`  created in pickup window    : ${p.counts.pickup}`);
+  console.log(`  created month-to-date       : ${p.counts.salesMTD}`);
+  console.log(`  missing finance data        : ${p.missingFinanceCount}`);
+  if (p.missingFinanceCount > 0) {
+    p.missingFinance.slice(0, 20).forEach(m => console.log(`     - ${m.guest} (${m.id})`));
+  }
+  console.log(`\nBucketed nights (pickup): FTM=${p.pickupNights.currentMonth} next=${p.pickupNights.nextMonth} future=${p.pickupNights.futureMonths}`);
+  console.log(`\nOccupancy basis (live calendar state at run time):`);
+  for (const [label, o] of [['FTM', p.occupancyCurrent], ['Next', p.occupancyNext]]) {
+    console.log(`  ${label.padEnd(5)} guestBooked=${o.guestBookedNights} sellable=${o.sellableNights} ` +
+      `unavailable=${o.unavailableNights} totalListingNights=${o.totalListingNights} -> ${o.occupancyPercent.toFixed(1)}%`);
+  }
+  console.log(`\nFinance totals:`);
+  console.log(`  Total Revenue   FTM=${p.revenue.currentMonth.toFixed(2)}   next=${p.revenue.nextMonth.toFixed(2)}`);
+  console.log(`  Cleaning Income FTM=${p.cleaning.currentMonth.toFixed(2)}   next=${p.cleaning.nextMonth.toFixed(2)}`);
+  console.log(`  Channel Fee     FTM=${p.channelFee.currentMonth.toFixed(2)}   next=${p.channelFee.nextMonth.toFixed(2)}`);
+  console.log(`  Margin          FTM=${p.margin.currentMonth.toFixed(2)}   next=${p.margin.nextMonth.toFixed(2)}`);
+  console.log(`  Pickup Revenue  FTM=${p.pickupRevenue.currentMonth.toFixed(2)}   next=${p.pickupRevenue.nextMonth.toFixed(2)}   future=${p.pickupRevenue.futureMonths.toFixed(2)}`);
+  console.log(`  Sales from Current Month = ${p.salesFromCurrentMonth.toFixed(2)}`);
+  console.log('=== END PORTFOLIO DEBUG ===\n');
+}
+
 // Print debug table to console
 function printDebugTable(debugData) {
   console.log('\n📋 DEBUG DATA - Occupancy Details for All Properties\n');
@@ -760,8 +1115,13 @@ async function main() {
     // Print debug table
     printDebugTable(debugData.slice(0, 5)); // Show first 5 for brevity
 
+    console.log('Calculating portfolio performance...');
+    const portfolio = calculatePortfolioReport(data);
+    if (process.env.DRY_RUN === 'true') printPortfolioDebug(portfolio);
+
     // Format and send the report
-    const emailReport = formatEmailReport(occupancy, revenue, lowOccupancyAlerts, data.today);
+    const emailReport = formatEmailReport(occupancy, revenue, lowOccupancyAlerts, data.today)
+      + formatPortfolioSection(portfolio);
     console.log('\n📧 EMAIL REPORT:\n');
     console.log(emailReport);
 
