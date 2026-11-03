@@ -602,6 +602,7 @@ function calculatePortfolioReport(data) {
 
   const zeroBuckets = () => ({ currentMonth: 0, nextMonth: 0, futureMonths: 0 });
   const totals = {
+    stayNights: zeroBuckets(),
     pickupNights: zeroBuckets(),
     pickupRevenue: zeroBuckets(),
     revenue: zeroBuckets(),
@@ -636,6 +637,8 @@ function calculatePortfolioReport(data) {
 
     if (inMonths) {
       counts.monthBuckets++;
+      totals.stayNights.currentMonth += buckets.currentMonth;
+      totals.stayNights.nextMonth += buckets.nextMonth;
       for (const key of ['currentMonth', 'nextMonth']) {
         totals.revenue[key] += perNight(finance.accommodationFare) * buckets[key];
         totals.cleaning[key] += perNight(finance.cleaningFee) * buckets[key];
@@ -984,7 +987,11 @@ function printPortfolioDebug(p) {
   if (p.missingFinanceCount > 0) {
     p.missingFinance.slice(0, 20).forEach(m => console.log(`     - ${m.guest} (${m.id})`));
   }
-  console.log(`\nBucketed nights (pickup): FTM=${p.pickupNights.currentMonth} next=${p.pickupNights.nextMonth} future=${p.pickupNights.futureMonths}`);
+  console.log(`\nBucketed stay nights (month totals): FTM=${p.stayNights.currentMonth} next=${p.stayNights.nextMonth}`);
+  console.log(`Bucketed nights (pickup)          : FTM=${p.pickupNights.currentMonth} next=${p.pickupNights.nextMonth} future=${p.pickupNights.futureMonths}`);
+  const rate = (rev, n) => n > 0 ? (rev / n).toFixed(0) : 'n/a';
+  console.log(`Implied nightly rate              : FTM=${rate(p.revenue.currentMonth, p.stayNights.currentMonth)} next=${rate(p.revenue.nextMonth, p.stayNights.nextMonth)}`);
+  console.log(`Revenue nights vs calendar guest-booked nights: FTM ${p.stayNights.currentMonth} vs ${p.occupancyCurrent.guestBookedNights}, next ${p.stayNights.nextMonth} vs ${p.occupancyNext.guestBookedNights}`);
   console.log(`\nOccupancy basis (live calendar state at run time):`);
   for (const [label, o] of [['FTM', p.occupancyCurrent], ['Next', p.occupancyNext]]) {
     console.log(`  ${label.padEnd(5)} guestBooked=${o.guestBookedNights} sellable=${o.sellableNights} ` +
