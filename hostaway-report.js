@@ -253,6 +253,7 @@ async function getHostawayData() {
   }
 
   const token = tokenRes.body.access_token;
+  const runStartedAt = new Date();
   const today = getTodayIST();
   const endDateStr = getDateNDaysFromTodayIST(15);
 
@@ -433,6 +434,7 @@ async function getHostawayData() {
     financialData,
     financeFailures,
     financeCandidateCount: financeCandidates.length,
+    runStartedAt,
     months,
     pickupWindow,
     today,
@@ -970,6 +972,90 @@ function formatPortfolioSection(portfolio) {
   return out;
 }
 
+// Inventory sanity: what is counted, what is deliberately excluded, what the calendar
+// failed to cover, and any listing that reservations reference but the listings endpoint
+// no longer returns (i.e. removed or deactivated since those bookings were made).
+function buildInventoryDiagnostics(listings, reservations, calendarData, months) {
+  const excluded = listings.filter(l => EXCLUDED_LISTINGS.includes(l.id));
+  const included = listings.filter(l => !EXCLUDED_LISTINGS.includes(l.id));
+  const expectedDates = eachDate(months.currentStart, months.nextEnd);
+
+  const calendarGaps = [];
+  for (const listing of included) {
+    const have = new Set((calendarData[listing.id] || []).map(c => c.date));
+    const missing = expectedDates.filter(d => !have.has(d));
+    if (missing.length > 0) {
+      calendarGaps.push({
+        id: listing.id,
+        name: listing.internalListingName,
+        missingCount: missing.length,
+        firstMissing: missing[0],
+        lastMissing: missing[missing.length - 1],
+      });
+    }
+  }
+
+  const knownIds = new Set(listings.map(l => l.id));
+  const orphans = new Map();
+  for (const r of reservations) {
+    if (knownIds.has(r.listingMapId)) continue;
+    if (!orphans.has(r.listingMapId)) {
+      orphans.set(r.listingMapId, { id: r.listingMapId, name: r.listingName, reservations: 0 });
+    }
+    orphans.get(r.listingMapId).reservations++;
+  }
+
+  return {
+    totalReturned: listings.length,
+    includedCount: included.length,
+    excluded: excluded.map(l => ({ id: l.id, name: l.internalListingName })),
+    excludedConfigured: EXCLUDED_LISTINGS,
+    calendarGaps,
+    expectedDateCount: expectedDates.length,
+    orphanListings: [...orphans.values()].sort((a, b) => b.reservations - a.reservations),
+  };
+}
+
+function printInventoryDebug(inv, pickupWindow, runStartedAt) {
+  console.log('\n=== INVENTORY & TIMING DEBUG ===');
+  console.log(`Listings returned by API : ${inv.totalReturned}`);
+  console.log(`Total units included     : ${inv.includedCount}`);
+  console.log(`Excluded listing IDs     : ${inv.excludedConfigured.join(', ') || 'none'}`);
+  inv.excluded.forEach(l => console.log(`    excluded: ${l.id} - ${l.name}`));
+  if (inv.excludedConfigured.length !== inv.excluded.length) {
+    const missing = inv.excludedConfigured.filter(id => !inv.excluded.some(l => l.id === id));
+    console.log(`    note: configured exclusions not present in the API response: ${missing.join(', ')}`);
+  }
+
+  console.log(`\nCalendar coverage        : ${inv.expectedDateCount} dates expected per listing`);
+  if (inv.calendarGaps.length === 0) {
+    console.log(`  no listings with missing calendar dates`);
+  } else {
+    console.log(`  ${inv.calendarGaps.length} listings with missing calendar dates:`);
+    inv.calendarGaps.slice(0, 25).forEach(g =>
+      console.log(`    ${g.id} - ${g.name}: ${g.missingCount} missing (${g.firstMissing} .. ${g.lastMissing})`));
+  }
+
+  console.log(`\nListings referenced by reservations but absent from the listings endpoint:`);
+  if (inv.orphanListings.length === 0) {
+    console.log(`  none - every reservation maps to a current listing`);
+  } else {
+    inv.orphanListings.forEach(o =>
+      console.log(`    ${o.id} - ${o.name || '(name unavailable)'} (${o.reservations} reservations)`));
+    console.log(`  These are removed or deactivated listings; their nights are not counted.`);
+  }
+
+  const cutoff = pickupWindow.end;
+  const driftMinutes = (runStartedAt - cutoff) / 60000;
+  console.log(`\nLogical report cutoff    : ${cutoff.toISOString()} (18:00 IST)`);
+  console.log(`Actual execution started : ${runStartedAt.toISOString()}`);
+  console.log(`Drift                    : ${driftMinutes >= 0 ? '+' : ''}${driftMinutes.toFixed(1)} minutes`);
+  if (driftMinutes < 0) {
+    console.log(`  Running BEFORE the cutoff: bookings made between now and 18:00 IST are not yet included.`);
+  }
+  console.log('=== END INVENTORY & TIMING DEBUG ===\n');
+}
+
 function printPortfolioDebug(p) {
   console.log('\n=== PORTFOLIO DEBUG ===');
   console.log(`Report date (IST)      : ${p.today}`);
@@ -1124,7 +1210,11 @@ async function main() {
 
     console.log('Calculating portfolio performance...');
     const portfolio = calculatePortfolioReport(data);
-    if (process.env.DRY_RUN === 'true') printPortfolioDebug(portfolio);
+    if (process.env.DRY_RUN === 'true') {
+      const inventory = buildInventoryDiagnostics(data.listings, data.reservations, data.calendar, data.months);
+      printInventoryDebug(inventory, data.pickupWindow, data.runStartedAt);
+      printPortfolioDebug(portfolio);
+    }
 
     // Format and send the report
     const emailReport = formatEmailReport(occupancy, revenue, lowOccupancyAlerts, data.today)

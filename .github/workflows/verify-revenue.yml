@@ -23,6 +23,51 @@ on:
         description: 'Cleaning Fee from the CSV export'
         required: true
         default: '4526.63'
+      expected_ftm_revenue:
+        description: 'Portfolio: Total Revenue FTM from export (blank = skip)'
+        required: false
+      expected_next_revenue:
+        description: 'Portfolio: Total Revenue Next Month from export (blank = skip)'
+        required: false
+      expected_clean_ftm:
+        description: 'Portfolio: Cleaning Income FTM from export (blank = skip)'
+        required: false
+      expected_clean_next:
+        description: 'Portfolio: Cleaning Income Next Month from export (blank = skip)'
+        required: false
+      expected_channel_ftm:
+        description: 'Portfolio: Channel Fee FTM from export (blank = skip)'
+        required: false
+      expected_channel_next:
+        description: 'Portfolio: Channel Fee Next Month from export (blank = skip)'
+        required: false
+      expected_margin_ftm:
+        description: 'Portfolio: Margin FTM from export (blank = skip)'
+        required: false
+      expected_margin_next:
+        description: 'Portfolio: Margin Next Month from export (blank = skip)'
+        required: false
+      expected_pickup_nights_ftm:
+        description: 'Portfolio: Pickup Nights FTM from export (blank = skip)'
+        required: false
+      expected_pickup_nights_next:
+        description: 'Portfolio: Pickup Nights Next Month from export (blank = skip)'
+        required: false
+      expected_pickup_nights_future:
+        description: 'Portfolio: Pickup Nights Future Months from export (blank = skip)'
+        required: false
+      expected_pickup_ftm:
+        description: 'Portfolio: Pickup Revenue FTM from export (blank = skip)'
+        required: false
+      expected_pickup_next:
+        description: 'Portfolio: Pickup Revenue Next Month from export (blank = skip)'
+        required: false
+      expected_pickup_future:
+        description: 'Portfolio: Pickup Revenue Future Months from export (blank = skip)'
+        required: false
+      expected_sales_mtd:
+        description: 'Portfolio: Sales from Current Month from export (blank = skip)'
+        required: false
       tolerance:
         description: 'Allowed rupee difference. Use 1 with a freshly-pulled export.'
         required: false
@@ -52,4 +97,19 @@ jobs:
           EXP_PM: ${{ inputs.expected_pm_commission }}
           EXP_CLEAN: ${{ inputs.expected_cleaning }}
           TOLERANCE: ${{ inputs.tolerance }}
+          EXP_FTM_REVENUE: ${{ inputs.expected_ftm_revenue }}
+          EXP_NEXT_REVENUE: ${{ inputs.expected_next_revenue }}
+          EXP_CLEAN_FTM: ${{ inputs.expected_clean_ftm }}
+          EXP_CLEAN_NEXT: ${{ inputs.expected_clean_next }}
+          EXP_CHANNEL_FTM: ${{ inputs.expected_channel_ftm }}
+          EXP_CHANNEL_NEXT: ${{ inputs.expected_channel_next }}
+          EXP_MARGIN_FTM: ${{ inputs.expected_margin_ftm }}
+          EXP_MARGIN_NEXT: ${{ inputs.expected_margin_next }}
+          EXP_PICKUP_NIGHTS_FTM: ${{ inputs.expected_pickup_nights_ftm }}
+          EXP_PICKUP_NIGHTS_NEXT: ${{ inputs.expected_pickup_nights_next }}
+          EXP_PICKUP_NIGHTS_FUTURE: ${{ inputs.expected_pickup_nights_future }}
+          EXP_PICKUP_FTM: ${{ inputs.expected_pickup_ftm }}
+          EXP_PICKUP_NEXT: ${{ inputs.expected_pickup_next }}
+          EXP_PICKUP_FUTURE: ${{ inputs.expected_pickup_future }}
+          EXP_SALES_MTD: ${{ inputs.expected_sales_mtd }}
         run: node verify-revenue.js report-output.txt
