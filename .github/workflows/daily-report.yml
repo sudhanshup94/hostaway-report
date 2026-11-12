@@ -27,6 +27,11 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # Hermetic - stubbed transport, no network. Guards the fetch layer against a
+      # regression to silently treating a failed page as an empty one.
+      - name: Run tests
+        run: npm test
+
       - name: Run Hostaway Report
         env:
           HOSTAWAY_ACCOUNT_ID: ${{ secrets.HOSTAWAY_ACCOUNT_ID }}

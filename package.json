@@ -4,7 +4,8 @@
   "description": "Daily Hostaway occupancy and revenue reports via email",
   "main": "hostaway-report.js",
   "scripts": {
-    "start": "node hostaway-report.js"
+    "start": "node hostaway-report.js",
+    "test": "node test-fetch-failures.js"
   },
   "keywords": [
     "hostaway",

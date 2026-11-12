@@ -151,11 +151,10 @@ function promiseLimit(concurrency) {
         } catch (err) {
           reject(err);
         } finally {
-          running--;
-          if (queue.length > 0) {
-            const next = queue.shift();
-            next();
-          }
+          // Hand the slot straight to the next queued task rather than decrementing
+          // and re-incrementing, so 'running' stays an accurate count of in-flight work.
+          if (queue.length > 0) queue.shift()();
+          else running--;
         }
       };
 
@@ -244,6 +243,81 @@ async function httpsRequest(options, data = null, retries = 3, abortSignal = nul
   }
 }
 
+// Raised when Hostaway data could not be retrieved in full. Everything downstream
+// counts rows, so a dropped page silently understates the report rather than breaking
+// it. That is the one failure mode worth crashing over: a quietly wrong report is
+// worse than no report, because nobody goes looking for the error.
+class DataIncompleteError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'DataIncompleteError';
+  }
+}
+
+// Transient conditions worth another attempt. Anything else is a real answer from
+// Hostaway and retrying it just delays the failure.
+const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+const FETCH_ATTEMPTS = 3;
+
+// The single way every listings / calendar / reservations page is read.
+//
+// It returns the 'result' array only when the request genuinely succeeded. A transport
+// error, a non-2xx status, or a body without a result array all raise
+// DataIncompleteError once retries are exhausted. It never returns [] as a stand-in for
+// a failure - a real empty page is an empty array and ends pagination, a failed page
+// stops the run.
+async function fetchResult(path, token, label) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++) {
+    let res = null;
+    try {
+      res = await httpsRequest({
+        hostname: 'api.hostaway.com',
+        path,
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+    } catch (err) {
+      lastError = new DataIncompleteError(`${label}: request failed (${err.message})`);
+      if (attempt < FETCH_ATTEMPTS) {
+        console.warn(`  retry ${attempt}/${FETCH_ATTEMPTS - 1} - ${label}: ${err.message}`);
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+      throw lastError;
+    }
+
+    if (typeof res.status !== 'number' || res.status < 200 || res.status >= 300) {
+      lastError = new DataIncompleteError(`${label}: HTTP ${res.status}`);
+      if (RETRYABLE_STATUS.has(res.status) && attempt < FETCH_ATTEMPTS) {
+        console.warn(`  retry ${attempt}/${FETCH_ATTEMPTS - 1} - ${label}: HTTP ${res.status}`);
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+      throw lastError;
+    }
+
+    const result = res.body?.result;
+    if (!Array.isArray(result)) {
+      const shape = res.body === null || res.body === undefined
+        ? String(res.body)
+        : typeof res.body === 'string' ? `string: ${res.body.slice(0, 120)}` : `keys: ${Object.keys(res.body).join(',')}`;
+      lastError = new DataIncompleteError(`${label}: HTTP ${res.status} but no result array (${shape})`);
+      if (attempt < FETCH_ATTEMPTS) {
+        console.warn(`  retry ${attempt}/${FETCH_ATTEMPTS - 1} - ${label}: malformed body`);
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+      throw lastError;
+    }
+
+    return result;
+  }
+
+  throw lastError;
+}
+
 async function getHostawayData() {
   // Get access token first
   const tokenBody = `grant_type=client_credentials&client_id=${HOSTAWAY_ACCOUNT_ID}&client_secret=${HOSTAWAY_API_KEY}&scope=general`;
@@ -305,14 +379,12 @@ async function getHostawayData() {
   let totalFetched = 0;
 
   while (true) {
-    const listingsRes = await httpsRequest({
-      hostname: 'api.hostaway.com',
-      path: `/v1/listings?accountId=${HOSTAWAY_ACCOUNT_ID}&limit=${listingLimit}&offset=${offset}`,
-      method: 'GET',
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
+    const listings = await fetchResult(
+      `/v1/listings?accountId=${HOSTAWAY_ACCOUNT_ID}&limit=${listingLimit}&offset=${offset}`,
+      token,
+      `listings page at offset ${offset}`
+    );
 
-    const listings = listingsRes.body?.result || [];
     if (listings.length === 0) {
       console.log(`✓ Pagination complete at offset ${offset}`);
       break;
@@ -334,46 +406,41 @@ async function getHostawayData() {
   const limiter = promiseLimit(5);
   const filteredListings = listingsArray.filter(l => !EXCLUDED_LISTINGS.includes(l.id));
 
+  // No try/catch here on purpose. A listing whose calendar or reservations could not be
+  // read must abort the run, not contribute zero rows: the report counts units and
+  // reservations, so swallowing the error produces a confident, badly understated report.
   const listingFetches = filteredListings.map((listing) =>
     limiter(async () => {
-      try {
-        // Fetch calendar and reservations in parallel (they're independent).
-        // Reservations start from the current month's first day rather than today, so the
-        // portfolio section sees bookings that already departed earlier this month and
-        // bookings made this month for far-future stays. Today's figures filter to today
-        // downstream and are unaffected by the wider set.
-        const [cal, listingReservations] = await Promise.all([
-          httpsRequest({
-            hostname: 'api.hostaway.com',
-            path: `/v1/listings/${listing.id}/calendar?accountId=${HOSTAWAY_ACCOUNT_ID}&startDate=${calendarStart}&endDate=${calendarEnd}`,
-            method: 'GET',
-            headers: { 'Authorization': `Bearer ${token}` },
-          }),
-          (async () => {
-            const collected = [];
-            const pageSize = 500;
-            for (let pageOffset = 0; ; pageOffset += pageSize) {
-              const res = await httpsRequest({
-                hostname: 'api.hostaway.com',
-                path: `/v1/reservations?accountId=${HOSTAWAY_ACCOUNT_ID}&listingId=${listing.id}&status=active,confirmed,new,modified&departureDateFrom=${calendarStart}&limit=${pageSize}&offset=${pageOffset}`,
-                method: 'GET',
-                headers: { 'Authorization': `Bearer ${token}` },
-              });
-              const batch = res.body?.result || [];
-              collected.push(...batch);
-              if (batch.length < pageSize) break;
-            }
-            return collected;
-          })(),
-        ]);
+      // Fetch calendar and reservations in parallel (they're independent).
+      // Reservations start from the current month's first day rather than today, so the
+      // portfolio section sees bookings that already departed earlier this month and
+      // bookings made this month for far-future stays. Today's figures filter to today
+      // downstream and are unaffected by the wider set.
+      const [cal, listingReservations] = await Promise.all([
+        fetchResult(
+          `/v1/listings/${listing.id}/calendar?accountId=${HOSTAWAY_ACCOUNT_ID}&startDate=${calendarStart}&endDate=${calendarEnd}`,
+          token,
+          `calendar for listing ${listing.id}`
+        ),
+        (async () => {
+          const collected = [];
+          const pageSize = 500;
+          for (let pageOffset = 0; ; pageOffset += pageSize) {
+            const batch = await fetchResult(
+              `/v1/reservations?accountId=${HOSTAWAY_ACCOUNT_ID}&listingId=${listing.id}&status=active,confirmed,new,modified&departureDateFrom=${calendarStart}&limit=${pageSize}&offset=${pageOffset}`,
+              token,
+              `reservations for listing ${listing.id} at offset ${pageOffset}`
+            );
+            collected.push(...batch);
+            if (batch.length < pageSize) break;
+          }
+          return collected;
+        })(),
+      ]);
 
-        calendarData[listing.id] = cal.body?.result || [];
+      calendarData[listing.id] = cal;
 
-        return listingReservations;
-      } catch (err) {
-        console.error(`Error fetching data for listing ${listing.id}: ${err.message}`);
-        return [];
-      }
+      return listingReservations;
     })
   );
 
@@ -1187,6 +1254,61 @@ async function sendViaGmail(report) {
 }
 
 
+// Tells the recipients the report is missing and why. Deliberately carries no figures:
+// a partial number next to the word "incomplete" is still a number people will quote.
+async function sendFailureAlert(error, today) {
+  if (!SMTP_USER || !SMTP_PASS || !EMAIL_FROM || !EMAIL_TO) {
+    console.error('⚠️  Cannot send failure alert: email is not configured.');
+    return false;
+  }
+
+  const recipients = EMAIL_TO.split(',').map(e => e.trim()).filter(Boolean);
+  if (recipients.length === 0) return false;
+
+  const incomplete = error instanceof DataIncompleteError;
+  const dateLabel = today || getTodayIST();
+
+  const body = [
+    `HOSTAWAY DAILY REPORT - NOT SENT (${dateLabel})`,
+    '',
+    incomplete
+      ? 'The daily report was not sent because Hostaway data retrieval was incomplete.'
+      : 'The daily report was not sent because it could not be generated.',
+    '',
+    'No figures are included here on purpose. Partial data would understate occupancy',
+    'and revenue, and a wrong number is worse than a missing one.',
+    '',
+    `Reason: ${error.message}`,
+    '',
+    'The automation will try again at the next scheduled run. No action is needed unless',
+    'this repeats.',
+  ].join('\n');
+
+  const transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+    connectionTimeout: 10000,
+    socketTimeout: 10000,
+  });
+
+  try {
+    await transporter.sendMail({
+      from: EMAIL_FROM,
+      to: recipients,
+      subject: `⚠️ Hostaway Daily Report NOT SENT - incomplete data (${dateLabel})`,
+      text: body,
+      html: `<pre style="font-family: monospace; white-space: pre-wrap;">${body.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`,
+    });
+    console.error(`✓ Failure alert sent to ${recipients.length} recipients.`);
+    return true;
+  } catch (err) {
+    console.error(`❌ Failure alert could not be delivered: ${err.message}`);
+    return false;
+  }
+}
+
 async function main() {
   try {
     console.log('Fetching Hostaway data...');
@@ -1257,8 +1379,31 @@ async function main() {
     console.log('\n✅ Report sent successfully!');
   } catch (error) {
     console.error('❌ Error:', error.message);
+
+    if (error instanceof DataIncompleteError) {
+      console.error('\n⛔ RUN ABORTED - Hostaway data retrieval was incomplete.');
+      console.error('   No report was sent. The figures would have been understated,');
+      console.error('   because a page that failed to load counts as zero rows.');
+    }
+
+    if (process.env.DRY_RUN === 'true') {
+      console.error('\n🔍 DRY_RUN - no failure alert emailed.');
+    } else {
+      await sendFailureAlert(error);
+    }
+
     process.exit(1);
   }
 }
 
-main();
+// Exported so the tests can drive the real fetch paths against a stubbed transport.
+module.exports = {
+  getHostawayData,
+  fetchResult,
+  promiseLimit,
+  DataIncompleteError,
+};
+
+if (require.main === module) {
+  main();
+}
