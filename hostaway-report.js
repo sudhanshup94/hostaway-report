@@ -1401,6 +1401,7 @@ module.exports = {
   getHostawayData,
   fetchResult,
   promiseLimit,
+  sendFailureAlert,
   DataIncompleteError,
 };
 

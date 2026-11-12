@@ -18,8 +18,13 @@ const assert = require('assert');
 process.env.HOSTAWAY_ACCOUNT_ID = 'test-account';
 process.env.HOSTAWAY_API_KEY = 'test-key';
 process.env.REPORT_DATE = '2026-11-10';
+process.env.SMTP_USER = 'stub-user';
+process.env.SMTP_PASS = 'stub-pass';
+process.env.EMAIL_FROM = 'reports@example.invalid';
+process.env.EMAIL_TO = 'a@example.invalid, b@example.invalid';
 
-const { getHostawayData, DataIncompleteError } = require(process.env.MODULE_UNDER_TEST || './hostaway-report.js');
+const nodemailer = require('nodemailer');
+const { getHostawayData, sendFailureAlert, DataIncompleteError } = require(process.env.MODULE_UNDER_TEST || './hostaway-report.js');
 
 const realRequest = https.request;
 
@@ -231,6 +236,38 @@ async function expectIncomplete(plan, matcher) {
     await getHostawayData();
     assert.ok(maxConcurrentCalendar > 1, `expected parallel work, saw ${maxConcurrentCalendar}`);
     assert.ok(maxConcurrentCalendar <= 5, `concurrency exceeded 5: ${maxConcurrentCalendar}`);
+  });
+
+  // --- the alert that reaches recipients ---------------------------------------
+
+  const realCreateTransport = nodemailer.createTransport;
+  function captureMail() {
+    const sent = [];
+    nodemailer.createTransport = () => ({ sendMail: async (m) => { sent.push(m); return { messageId: "stub" }; } });
+    return sent;
+  }
+
+  await test("failure alert goes to every recipient and names the date", async () => {
+    const sent = captureMail();
+    try {
+      await sendFailureAlert(new DataIncompleteError("calendar for listing 101: HTTP 429"), "2026-11-10");
+    } finally { nodemailer.createTransport = realCreateTransport; }
+    assert.strictEqual(sent.length, 1, "exactly one alert");
+    assert.deepStrictEqual(sent[0].to, ["a@example.invalid", "b@example.invalid"], "all recipients");
+    assert.ok(/NOT SENT/.test(sent[0].subject), "subject says the report was not sent");
+    assert.ok(sent[0].subject.includes("2026-11-10"), "subject names the date");
+  });
+
+  await test("failure alert carries no metrics, only the reason", async () => {
+    const sent = captureMail();
+    try {
+      await sendFailureAlert(new DataIncompleteError("calendar for listing 101: HTTP 429"), "2026-11-10");
+    } finally { nodemailer.createTransport = realCreateTransport; }
+    const body = sent[0].text;
+    assert.ok(!/₹/.test(body), "no currency figures");
+    assert.ok(!/Occupied Units|Occupancy|Accommodation Fare|PM Commission|Cleaning Fee/.test(body), "no report metrics");
+    assert.ok(/data retrieval was incomplete/.test(body), "states the cause");
+    assert.ok(/calendar for listing 101: HTTP 429/.test(body), "includes the underlying reason");
   });
 
   https.request = realRequest;
