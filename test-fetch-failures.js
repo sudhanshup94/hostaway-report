@@ -24,7 +24,10 @@ process.env.EMAIL_FROM = 'reports@example.invalid';
 process.env.EMAIL_TO = 'a@example.invalid, b@example.invalid';
 
 const nodemailer = require('nodemailer');
-const { getHostawayData, sendFailureAlert, DataIncompleteError } = require(process.env.MODULE_UNDER_TEST || './hostaway-report.js');
+const { main, getHostawayData, sendFailureAlert, DataIncompleteError } = require(process.env.MODULE_UNDER_TEST || './hostaway-report.js');
+
+// These tests exercise the real send path, so the run must not think it is a dry run.
+delete process.env.DRY_RUN;
 
 const realRequest = https.request;
 
@@ -236,6 +239,83 @@ async function expectIncomplete(plan, matcher) {
     await getHostawayData();
     assert.ok(maxConcurrentCalendar > 1, `expected parallel work, saw ${maxConcurrentCalendar}`);
     assert.ok(maxConcurrentCalendar <= 5, `concurrency exceeded 5: ${maxConcurrentCalendar}`);
+  });
+
+  // --- finance failures follow the same all-or-nothing rule ---------------------
+
+  // Drives the whole of main(): which emails go out, and what the process exits with.
+  async function runMain(plan) {
+    installStub(plan);
+    const sent = [];
+    const realCreate = nodemailer.createTransport;
+    const realExit = process.exit;
+    const exitCodes = [];
+    nodemailer.createTransport = () => ({ sendMail: async (m) => { sent.push(m); return { messageId: 'stub' }; } });
+    process.exit = (code) => { exitCodes.push(code); };
+    try {
+      await main();
+    } finally {
+      nodemailer.createTransport = realCreate;
+      process.exit = realExit;
+    }
+    const normal = sent.filter(m => !/NOT SENT/.test(m.subject));
+    const alerts = sent.filter(m => /NOT SENT/.test(m.subject));
+    return { sent, normal, alerts, exitCodes };
+  }
+
+  // Finance for one reservation never succeeds.
+  function financeDownPlan() {
+    const base = healthyPlan({ listingCount: 3, reservationsPerListing: 2 });
+    return (options) => {
+      const path = options.path || '';
+      if (path.includes('financeCalculatedField/reservation/100000')) {
+        return { status: 500, body: { message: 'upstream error' } };
+      }
+      return base(options);
+    };
+  }
+
+  await test('finance: a failed lookup aborts the whole run', async () => {
+    installStub(financeDownPlan());
+    let thrown = null;
+    try { await getHostawayData(); } catch (err) { thrown = err; }
+    assert.ok(thrown, 'expected the run to abort on incomplete finance data');
+    assert.ok(thrown instanceof DataIncompleteError, `expected DataIncompleteError, got ${thrown.name}`);
+    assert.ok(/finance data incomplete/.test(thrown.message), `message: ${thrown.message}`);
+  });
+
+  await test('finance: no normal report is sent, and the run exits non-zero', async () => {
+    const { normal, exitCodes } = await runMain(financeDownPlan());
+    assert.strictEqual(normal.length, 0, 'no normal report may go out on a finance failure');
+    assert.deepStrictEqual(exitCodes, [1], 'must exit non-zero so the workflow fails');
+  });
+
+  await test('finance: the alert reaches every recipient and carries no metrics', async () => {
+    const { alerts } = await runMain(financeDownPlan());
+    assert.strictEqual(alerts.length, 1, 'exactly one alert');
+    assert.deepStrictEqual(alerts[0].to, ['a@example.invalid', 'b@example.invalid'], 'all recipients');
+    const body = alerts[0].text;
+    assert.ok(/data retrieval was incomplete/.test(body), 'states the cause');
+    assert.ok(!/₹/.test(body), 'no currency figures');
+    assert.ok(!/Occupied Units|Occupancy|Accommodation Fare|PM Commission|Cleaning Fee|Margin|Pickup/.test(body), 'no report metrics');
+    assert.ok(!/guestName|@/.test(body.replace(/[a-z.]+@example\.invalid/g, '')), 'no guest details');
+  });
+
+  await test('finance: a lookup that succeeds on retry still sends the normal report', async () => {
+    const base = healthyPlan({ listingCount: 3, reservationsPerListing: 2 });
+    let attempts = 0;
+    const { normal, alerts, exitCodes } = await runMain((options) => {
+      const path = options.path || '';
+      if (path.includes('financeCalculatedField/reservation/100000')) {
+        attempts++;
+        if (attempts <= 2) return { status: 503, body: { message: 'unavailable' } };
+      }
+      return base(options);
+    });
+    assert.strictEqual(attempts, 3, 'expected 2 retries then success');
+    assert.strictEqual(alerts.length, 0, 'no alert when finance recovers');
+    assert.strictEqual(normal.length, 1, 'the normal report still goes out');
+    assert.deepStrictEqual(exitCodes, [], 'no non-zero exit');
   });
 
   // --- the alert that reaches recipients ---------------------------------------

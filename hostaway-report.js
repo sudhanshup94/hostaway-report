@@ -464,14 +464,12 @@ async function getHostawayData() {
   const financeFetches = financeCandidates.map((reservation) =>
     limiter(async () => {
       try {
-        const financeRes = await httpsRequest({
-          hostname: 'api.hostaway.com',
-          path: `/v1/financeCalculatedField/reservation/${reservation.id}?accountId=${HOSTAWAY_ACCOUNT_ID}`,
-          method: 'GET',
-          headers: { 'Authorization': `Bearer ${token}` },
-        }, null, 3);
+        const fields = await fetchResult(
+          `/v1/financeCalculatedField/reservation/${reservation.id}?accountId=${HOSTAWAY_ACCOUNT_ID}`,
+          token,
+          `finance for reservation ${reservation.id}`
+        );
 
-        const fields = financeRes.body?.result || [];
         const valueOf = (name) => {
           const field = fields.find(f => f.formulaName === name);
           return field ? Number(field.formulaResult) || 0 : null;
@@ -492,7 +490,9 @@ async function getHostawayData() {
 
         return { reservationId: reservation.id, accommodationFare, pmCommission, cleaningFee, channelFee };
       } catch (err) {
-        financeFailures.push({ id: reservation.id, guest: reservation.guestName, error: err.message });
+        // Collected rather than rethrown so the log can name every failed reservation,
+        // not just whichever lost the race. The run aborts once they are all in.
+        financeFailures.push({ id: reservation.id, listingId: reservation.listingMapId, error: err.message });
         return null;
       }
     })
@@ -510,9 +510,18 @@ async function getHostawayData() {
     }
   });
 
+  // Finance follows the same all-or-nothing rule as the calendar and reservation
+  // fetches. A missing finance record is not a zero-rupee booking, so a partial set
+  // understates accommodation, commission, cleaning, channel fee and margin at once.
+  // Reservation and listing IDs are logged here for troubleshooting; no guest details
+  // are logged, and none reach the alert email.
   if (financeFailures.length > 0) {
     console.error(`\n⚠️  FINANCE DATA INCOMPLETE: ${financeFailures.length}/${financeCandidates.length} reservations failed`);
-    financeFailures.forEach(f => console.error(`   - ${f.guest} (${f.id}): ${f.error}`));
+    console.error('   failed reservation IDs (no guest data):');
+    financeFailures.forEach(f => console.error(`   - reservation ${f.id} (listing ${f.listingId}): ${f.error}`));
+    throw new DataIncompleteError(
+      `finance data incomplete: ${financeFailures.length} of ${financeCandidates.length} reservations failed after retries`
+    );
   } else {
     console.log(`✓ Finance data complete for all ${financeCandidates.length} reservations`);
   }
@@ -1398,6 +1407,7 @@ async function main() {
 
 // Exported so the tests can drive the real fetch paths against a stubbed transport.
 module.exports = {
+  main,
   getHostawayData,
   fetchResult,
   promiseLimit,
