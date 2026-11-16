@@ -24,7 +24,10 @@ process.env.EMAIL_FROM = 'reports@example.invalid';
 process.env.EMAIL_TO = 'a@example.invalid, b@example.invalid';
 
 const nodemailer = require('nodemailer');
-const { main, getHostawayData, sendFailureAlert, DataIncompleteError } = require(process.env.MODULE_UNDER_TEST || './hostaway-report.js');
+const {
+  main, getHostawayData, sendFailureAlert, DataIncompleteError,
+  formatOperationsEmail, formatPortfolioSection,
+} = require(process.env.MODULE_UNDER_TEST || './hostaway-report.js');
 
 // These tests exercise the real send path, so the run must not think it is a dry run.
 delete process.env.DRY_RUN;
@@ -348,6 +351,37 @@ async function expectIncomplete(plan, matcher) {
     assert.ok(!/Occupied Units|Occupancy|Accommodation Fare|PM Commission|Cleaning Fee/.test(body), "no report metrics");
     assert.ok(/data retrieval was incomplete/.test(body), "states the cause");
     assert.ok(/calendar for listing 101: HTTP 429/.test(body), "includes the underlying reason");
+  });
+
+  await test('operations email includes Channel Fee and excludes the low-occupancy list', async () => {
+    const body = formatOperationsEmail(
+      { totalUnits: 10, occupiedUnits: 6, unavailableUnits: 1, sellableUnits: 9, occupancyPercent: '66.7' },
+      { accommodationFare: 1000, pmCommission: 200, cleaningFee: 50, channelFee: 75, reservationCount: 6, missingFinanceCount: 0 },
+      '2026-11-10'
+    );
+    assert.ok(/DAILY OPERATIONS SNAPSHOT/.test(body), 'operations title');
+    assert.ok(/Channel Fee: ₹75\.00/.test(body), 'channel fee is included');
+    assert.ok(!/Low Occupancy Alerts/.test(body), 'low occupancy list is not delivered');
+  });
+
+  await test('portfolio email retains all metrics and labels revenue accurately', async () => {
+    const body = formatPortfolioSection({
+      today: '2026-11-10',
+      months: { currentMonth: '2026-11', nextMonth: '2026-12', currentStart: '2026-11-01', currentEnd: '2026-11-30', nextStart: '2026-12-01', nextEnd: '2026-12-31' },
+      pickupNights: { currentMonth: 1, nextMonth: 2, futureMonths: 3 },
+      pickupRevenue: { currentMonth: 100, nextMonth: 200, futureMonths: 300 },
+      occupancyCurrent: { occupancyPercent: 40 }, occupancyNext: { occupancyPercent: 50 },
+      revenue: { currentMonth: 400, nextMonth: 500 }, cleaning: { currentMonth: 40, nextMonth: 50 },
+      channelFee: { currentMonth: 20, nextMonth: 25 }, margin: { currentMonth: 80, nextMonth: 100 },
+      salesFromCurrentMonth: 900, missingFinanceCount: 0,
+      pickupWindow: { start: new Date('2026-11-09T12:30:00Z'), end: new Date('2026-11-10T12:30:00Z') },
+    });
+    assert.ok(/SALES & PORTFOLIO REPORT/.test(body), 'portfolio title');
+    assert.ok(/Accommodation Revenue FTM/.test(body), 'revenue is accurately labelled');
+    assert.ok(!/Total Revenue FTM/.test(body), 'ambiguous label removed');
+    for (const label of ['Pickup Nights FTM', 'Pickup Revenue FTM', 'Occupancy FTM', 'Cleaning Income FTM', 'Channel Fee FTM', 'Margin FTM', 'Sales from Current Month']) {
+      assert.ok(body.includes(label), `missing ${label}`);
+    }
   });
 
   https.request = realRequest;

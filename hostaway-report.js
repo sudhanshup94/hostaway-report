@@ -58,6 +58,15 @@ function getTodayIST() {
   if (process.env.REPORT_DATE) return process.env.REPORT_DATE;
 
   const now = new Date();
+  // Cloud Scheduler can pass the intended slot explicitly. This makes the report
+  // reproducible even if the job is ever started late or manually retried.
+  if (process.env.SCHEDULED_SLOT_UTC) {
+    const scheduledSlot = new Date(process.env.SCHEDULED_SLOT_UTC);
+    if (Number.isNaN(scheduledSlot.getTime())) {
+      throw new Error('SCHEDULED_SLOT_UTC must be a valid ISO-8601 timestamp');
+    }
+    return istDate(scheduledSlot);
+  }
   // Manual runs report the day they are triggered; scheduled runs report their slot.
   const anchor = process.env.GITHUB_EVENT_NAME === 'schedule' ? getScheduledSlot(now) : now;
   return istDate(anchor);
@@ -850,6 +859,7 @@ function calculateTodayRevenue(reservations, today, financialData) {
 
   let accommodationFare = 0;
   let cleaningFee = 0;
+  let channelFee = 0;
   let pmCommission = 0;
   const missingFinance = [];
 
@@ -865,11 +875,13 @@ function calculateTodayRevenue(reservations, today, financialData) {
     accommodationFare += finance.accommodationFare / nights;
     pmCommission += finance.pmCommission / nights;
     cleaningFee += finance.cleaningFee / nights;
+    channelFee += finance.channelFee / nights;
   });
 
   console.log(`Accommodation Fare: ${accommodationFare.toFixed(2)}`);
   console.log(`PM Commission: ${pmCommission.toFixed(2)}`);
   console.log(`Cleaning Fee: ${cleaningFee.toFixed(2)}`);
+  console.log(`Channel Fee: ${channelFee.toFixed(2)}`);
   if (missingFinance.length > 0) {
     console.error(`⚠️  ${missingFinance.length} reservations excluded from revenue - no finance data: ${missingFinance.join(', ')}`);
   }
@@ -879,6 +891,7 @@ function calculateTodayRevenue(reservations, today, financialData) {
     accommodationFare: Math.max(0, accommodationFare),
     pmCommission: Math.max(0, pmCommission),
     cleaningFee: Math.max(0, cleaningFee),
+    channelFee: Math.max(0, channelFee),
     reservationCount: filteredReservations.length,
     missingFinanceCount: missingFinance.length,
   };
@@ -984,9 +997,9 @@ function calculateLowOccupancyAlerts(listings, today, calendarData, reservations
 }
 
 // Format email report
-function formatEmailReport(occupancy, revenue, lowOccupancyAlerts, today) {
+function formatOperationsEmail(occupancy, revenue, today) {
   const dateDisplay = new Date(today + 'T00:00:00Z').toLocaleDateString('en-IN');
-  let report = `Hostaway Daily Report - ${dateDisplay}\n\n`;
+  let report = `HIREAVILLA — DAILY OPERATIONS SNAPSHOT | ${dateDisplay}\n\n`;
 
   report += `1. Occupancy Today\n\n`;
   report += `Total Units: ${occupancy.totalUnits}\n`;
@@ -1001,25 +1014,9 @@ function formatEmailReport(occupancy, revenue, lowOccupancyAlerts, today) {
   }
   report += `Accommodation Fare: ₹${revenue.accommodationFare.toFixed(2)}\n`;
   report += `PM Commission: ₹${revenue.pmCommission.toFixed(2)}\n`;
-  report += `Cleaning Fee: ₹${revenue.cleaningFee.toFixed(2)}\n`;
+  report += `Cleaning Income: ₹${revenue.cleaningFee.toFixed(2)}\n`;
+  report += `Channel Fee: ₹${revenue.channelFee.toFixed(2)}\n`;
   report += `Based on ${revenue.reservationCount - revenue.missingFinanceCount} reservations earning revenue today.\n\n`;
-
-  report += `3. Low Occupancy Alerts - Next 15 Days\n\n`;
-  report += `This section shows properties with high sellable availability over the next 15 days where sales action may be required. Guest bookings, homeowner stays, maintenance blocks, and other calendar blocks are all treated as blocked/occupied because those dates are not available for sale.\n\n`;
-
-  const villas = lowOccupancyAlerts.filter(a => a.propertyType === 'Villa');
-  const apartments = lowOccupancyAlerts.filter(a => a.propertyType === 'Apartment');
-
-  report += `Villas below 30% blocked/occupied: ${villas.length} properties\n\n`;
-  villas.sort((a, b) => parseFloat(a.blockedOccupancyPercent) - parseFloat(b.blockedOccupancyPercent)).forEach((alert, idx) => {
-    report += `${idx + 1}. ${alert.internalListingName} - ${alert.blockedDays}/15 blocked - ${alert.availableDays}/15 available - ${alert.blockedOccupancyPercent}% - Next available: ${alert.nextAvailableDate}\n`;
-  });
-
-  report += `\nApartments below 50% blocked/occupied: ${apartments.length} properties\n\n`;
-  apartments.sort((a, b) => parseFloat(a.blockedOccupancyPercent) - parseFloat(b.blockedOccupancyPercent)).forEach((alert, idx) => {
-    report += `${idx + 1}. ${alert.internalListingName} - ${alert.blockedDays}/15 blocked - ${alert.availableDays}/15 available - ${alert.blockedOccupancyPercent}% - Next available: ${alert.nextAvailableDate}\n`;
-  });
-
   return report;
 }
 
@@ -1031,7 +1028,7 @@ function formatPortfolioSection(portfolio) {
     .toLocaleDateString('en-IN', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 
   const p = portfolio;
-  let out = `\nPORTFOLIO PERFORMANCE REPORT — ${p.today}\n\n`;
+  let out = `HIREAVILLA — SALES & PORTFOLIO REPORT | ${p.today}\n\n`;
   out += `Date: ${p.today} IST\n`;
   out += `Current month (FTM): ${monthName(p.months.currentMonth)} (${p.months.currentStart} to ${p.months.currentEnd})\n`;
   out += `Next month: ${monthName(p.months.nextMonth)} (${p.months.nextStart} to ${p.months.nextEnd})\n\n`;
@@ -1051,8 +1048,8 @@ function formatPortfolioSection(portfolio) {
   out += `Occupancy FTM: ${pct(p.occupancyCurrent.occupancyPercent)}\n`;
   out += `Occupancy Next Month: ${pct(p.occupancyNext.occupancyPercent)}\n\n`;
 
-  out += `Total Revenue FTM: ${money(p.revenue.currentMonth)}\n`;
-  out += `Total Revenue Next Month: ${money(p.revenue.nextMonth)}\n\n`;
+  out += `Accommodation Revenue FTM: ${money(p.revenue.currentMonth)}\n`;
+  out += `Accommodation Revenue Next Month: ${money(p.revenue.nextMonth)}\n\n`;
 
   out += `Cleaning Income FTM: ${money(p.cleaning.currentMonth)}\n`;
   out += `Cleaning Income Next Month: ${money(p.cleaning.nextMonth)}\n\n`;
@@ -1199,7 +1196,7 @@ function printDebugTable(debugData) {
   console.table(debugData);
 }
 
-async function sendViaGmail(report) {
+async function sendViaGmail(report, subject = '📊 Hostaway Daily Report') {
   // Validate required environment variables
   const missingVars = [];
   if (!SMTP_USER) missingVars.push('SMTP_USER');
@@ -1243,7 +1240,7 @@ async function sendViaGmail(report) {
     const result = await transporter.sendMail({
       from: EMAIL_FROM,
       to: recipients,
-      subject: '📊 Hostaway Daily Report',
+      subject,
       html: `<pre style="font-family: monospace; white-space: pre-wrap;">${report.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`,
       text: report,
     });
@@ -1265,7 +1262,7 @@ async function sendViaGmail(report) {
 
 // Tells the recipients the report is missing and why. Deliberately carries no figures:
 // a partial number next to the word "incomplete" is still a number people will quote.
-async function sendFailureAlert(error, today) {
+async function sendFailureAlert(error, today, reportName = 'Hostaway Daily Report') {
   if (!SMTP_USER || !SMTP_PASS || !EMAIL_FROM || !EMAIL_TO) {
     console.error('⚠️  Cannot send failure alert: email is not configured.');
     return false;
@@ -1278,11 +1275,11 @@ async function sendFailureAlert(error, today) {
   const dateLabel = today || getTodayIST();
 
   const body = [
-    `HOSTAWAY DAILY REPORT - NOT SENT (${dateLabel})`,
+    `${reportName.toUpperCase()} - NOT SENT (${dateLabel})`,
     '',
     incomplete
-      ? 'The daily report was not sent because Hostaway data retrieval was incomplete.'
-      : 'The daily report was not sent because it could not be generated.',
+      ? `The ${reportName.toLowerCase()} was not sent because Hostaway data retrieval was incomplete.`
+      : `The ${reportName.toLowerCase()} was not sent because it could not be generated.`,
     '',
     'No figures are included here on purpose. Partial data would understate occupancy',
     'and revenue, and a wrong number is worse than a missing one.',
@@ -1306,7 +1303,7 @@ async function sendFailureAlert(error, today) {
     await transporter.sendMail({
       from: EMAIL_FROM,
       to: recipients,
-      subject: `⚠️ Hostaway Daily Report NOT SENT - incomplete data (${dateLabel})`,
+      subject: `⚠️ ${reportName} NOT SENT - incomplete data (${dateLabel})`,
       text: body,
       html: `<pre style="font-family: monospace; white-space: pre-wrap;">${body.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`,
     });
@@ -1319,6 +1316,15 @@ async function sendFailureAlert(error, today) {
 }
 
 async function main() {
+  const reportMode = (process.env.REPORT_MODE || 'combined').toLowerCase();
+  if (!['operations', 'portfolio', 'combined'].includes(reportMode)) {
+    throw new Error('REPORT_MODE must be operations, portfolio, or combined');
+  }
+  const reportName = reportMode === 'operations'
+    ? 'Hireavilla Daily Operations Snapshot'
+    : reportMode === 'portfolio'
+      ? 'Hireavilla Sales & Portfolio Report'
+      : 'Hostaway Daily Report';
   try {
     console.log('Fetching Hostaway data...');
     const data = await getHostawayData();
@@ -1328,9 +1334,6 @@ async function main() {
 
     console.log('Calculating revenue...');
     const revenue = calculateTodayRevenue(data.reservations, data.today, data.financialData);
-
-    console.log('Calculating low occupancy alerts...');
-    const { alerts: lowOccupancyAlerts, debugData } = calculateLowOccupancyAlerts(data.listings, data.today, data.calendar, data.reservations);
 
     console.log('\n📊 REPORT SUMMARY');
     console.log('=================');
@@ -1342,26 +1345,7 @@ async function main() {
     console.log(`✓ Accommodation Fare: ₹${revenue.accommodationFare.toFixed(2)}`);
     console.log(`✓ PM Commission: ₹${revenue.pmCommission.toFixed(2)}`);
     console.log(`✓ Cleaning Fee: ₹${revenue.cleaningFee.toFixed(2)}`);
-    const villaAlerts = lowOccupancyAlerts.filter(a => a.propertyType === 'Villa').length;
-    const apartmentAlerts = lowOccupancyAlerts.filter(a => a.propertyType === 'Apartment').length;
-    console.log(`✓ Villas below 30%: ${villaAlerts}`);
-    console.log(`✓ Apartments below 50%: ${apartmentAlerts}`);
-
-    // Print occupied units list with reservation details
-    console.log('\n🏠 OCCUPIED UNITS TODAY:\n');
-    const occupiedUnits = debugData.filter(d => d.isOccupiedToday);
-    occupiedUnits.forEach((unit, idx) => {
-      // Find matching reservations for debug info
-      const matchingRes = data.reservations.find(r => r.listingMapId === unit.listingId &&
-        new Date(r.arrivalDate).toISOString().split('T')[0] <= data.today &&
-        new Date(r.departureDate).toISOString().split('T')[0] > data.today);
-      const channelInfo = matchingRes ? ` [${matchingRes.channelName}]` : '';
-      console.log(`${idx + 1}. ${unit.internalListingName} (ID: ${unit.listingId}) - Status: ${unit.todayCalendarStatus}${channelInfo}`);
-    });
-    console.log(`\nTotal Occupied: ${occupiedUnits.length}\n`);
-
-    // Print debug table
-    printDebugTable(debugData.slice(0, 5)); // Show first 5 for brevity
+    console.log(`✓ Channel Fee: ₹${revenue.channelFee.toFixed(2)}`);
 
     console.log('Calculating portfolio performance...');
     const portfolio = calculatePortfolioReport(data);
@@ -1371,9 +1355,13 @@ async function main() {
       printPortfolioDebug(portfolio);
     }
 
-    // Format and send the report
-    const emailReport = formatEmailReport(occupancy, revenue, lowOccupancyAlerts, data.today)
-      + formatPortfolioSection(portfolio);
+    // The legacy combined mode is retained only during migration. Cloud Run schedules
+    // one focused email per run: operations at 18:00 IST and portfolio at 18:15 IST.
+    const emailReport = reportMode === 'operations'
+      ? formatOperationsEmail(occupancy, revenue, data.today)
+      : reportMode === 'portfolio'
+        ? formatPortfolioSection(portfolio)
+        : `${formatOperationsEmail(occupancy, revenue, data.today)}\n${formatPortfolioSection(portfolio)}`;
     console.log('\n📧 EMAIL REPORT:\n');
     console.log(emailReport);
 
@@ -1382,8 +1370,8 @@ async function main() {
       return;
     }
 
-    console.log('\nSending via Resend...');
-    await sendViaGmail(emailReport);
+    console.log(`\nSending ${reportName}...`);
+    await sendViaGmail(emailReport, `📊 ${reportName} | ${data.today}`);
 
     console.log('\n✅ Report sent successfully!');
   } catch (error) {
@@ -1398,7 +1386,7 @@ async function main() {
     if (process.env.DRY_RUN === 'true') {
       console.error('\n🔍 DRY_RUN - no failure alert emailed.');
     } else {
-      await sendFailureAlert(error);
+      await sendFailureAlert(error, undefined, reportName);
     }
 
     process.exit(1);
@@ -1412,6 +1400,8 @@ module.exports = {
   fetchResult,
   promiseLimit,
   sendFailureAlert,
+  formatOperationsEmail,
+  formatPortfolioSection,
   DataIncompleteError,
 };
 
