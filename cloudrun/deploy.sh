@@ -42,7 +42,11 @@ create_schedule() {
     --location="$REGION" --schedule="$cron" --time-zone='Asia/Kolkata' --http-method=POST \
     --uri="https://run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/${target_job}:run" \
     --oauth-service-account-email="$SCHEDULER_SA" --oauth-token-scope='https://www.googleapis.com/auth/cloud-platform' \
-    --attempt-deadline=60s --max-retry-attempts=0 --paused
+    --headers='Content-Type=application/json' --message-body='{}' \
+    --attempt-deadline=60s --max-retry-attempts=0
+  # Validation must be an explicit decision. A newly deployed scheduler is paused
+  # immediately so it cannot create a second live email alongside GitHub Actions.
+  gcloud scheduler jobs pause "$scheduler_job" --location="$REGION"
 }
 
 create_schedule hireavilla-daily-operations-schedule '0 18 * * *' hireavilla-daily-operations
