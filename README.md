@@ -1,6 +1,10 @@
 # Hostaway Daily Report Agent
 
-Automated daily reports from Hostaway sent via email (Resend) and WhatsApp (Meta Business Cloud API).
+Automated daily reports from Hostaway, delivered by email only.
+
+WhatsApp/Twilio delivery was removed in commit `da5688e` and is no longer part of this
+system. There is no messaging code path left; a test asserts that nothing but Hostaway
+and the SMTP server is ever contacted.
 
 ## Setup
 
@@ -31,12 +35,9 @@ Add these secrets (copy/paste the values):
 |-------------|-------|
 | `HOSTAWAY_ACCOUNT_ID` | `52447` |
 | `HOSTAWAY_API_KEY` | Your API key |
-| `RESEND_API_KEY` | `re_GKC7A149_DhVbEZfNXdYGc6XfRZaHELha` |
+| `RESEND_API_KEY` | `<your Resend API key - set as a GitHub secret, never commit it>` |
 | `RESEND_SENDER` | `onboarding@resend.dev` |
 | `RESEND_RECIPIENT` | `sudhanshu@hireavilla.in` |
-| `WHATSAPP_PHONE_ID` | `593897667139589` |
-| `WHATSAPP_ACCESS_TOKEN` | Your access token |
-| `WHATSAPP_RECIPIENT` | `+919766020269` |
 
 ### 3. Enable Workflows
 
@@ -60,9 +61,6 @@ export HOSTAWAY_API_KEY=your_key
 export RESEND_API_KEY=your_key
 export RESEND_SENDER=onboarding@resend.dev
 export RESEND_RECIPIENT=sudhanshu@hireavilla.in
-export WHATSAPP_PHONE_ID=593897667139589
-export WHATSAPP_ACCESS_TOKEN=your_token
-export WHATSAPP_RECIPIENT=+919766020269
 
 node hostaway-report.js
 ```

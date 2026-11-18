@@ -1,3 +1,9 @@
+> **Superseded, retained as a historical record.** This document describes the July 2026
+> migration from Resend to Gmail SMTP, at which point WhatsApp/Twilio delivery still
+> existed. WhatsApp/Twilio delivery was removed from the system in commit `da5688e`.
+> Every reference to Twilio, WhatsApp or their environment variables below describes how
+> things were then, not how they are now. The report is delivered by email only.
+
 # Hostaway Report System - Resend to Gmail SMTP Migration Report
 
 **Migration Date:** 2026-07-29  

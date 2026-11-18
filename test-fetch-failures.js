@@ -14,6 +14,8 @@
 const { EventEmitter } = require('events');
 const https = require('https');
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 
 process.env.HOSTAWAY_ACCOUNT_ID = 'test-account';
 process.env.HOSTAWAY_API_KEY = 'test-key';
@@ -66,12 +68,16 @@ const FINANCE_FIELDS = [
 
 let maxConcurrentCalendar = 0;
 let inFlightCalendar = 0;
+let requestedHosts = [];
+let transportConfigs = [];
 
 function installStub(plan) {
   maxConcurrentCalendar = 0;
   inFlightCalendar = 0;
+  requestedHosts = [];
 
   https.request = function (options, cb) {
+    requestedHosts.push(options.hostname || options.host || '(none)');
     const req = new EventEmitter();
     req.write = () => {};
     req.destroy = () => {};
@@ -250,7 +256,11 @@ async function expectIncomplete(plan, matcher) {
     const realCreate = nodemailer.createTransport;
     const realExit = process.exit;
     const exitCodes = [];
-    nodemailer.createTransport = () => ({ sendMail: async (m) => { sent.push(m); return { messageId: 'stub' }; } });
+    transportConfigs = [];
+    nodemailer.createTransport = (cfg) => {
+      transportConfigs.push(cfg || {});
+      return { sendMail: async (m) => { sent.push(m); return { messageId: 'stub' }; } };
+    };
     process.exit = (code) => { exitCodes.push(code); };
     try {
       await main();
@@ -316,6 +326,67 @@ async function expectIncomplete(plan, matcher) {
     assert.strictEqual(alerts.length, 0, 'no alert when finance recovers');
     assert.strictEqual(normal.length, 1, 'the normal report still goes out');
     assert.deepStrictEqual(exitCodes, [], 'no non-zero exit');
+  });
+
+  // --- no WhatsApp / Twilio path is reachable ------------------------------------
+
+  // Hosts that would mean a message had left by something other than email.
+  const MESSAGING_HOSTS = /twilio|whatsapp|graph\.facebook|wa\.me|messagebird|gupshup|360dialog/i;
+
+  function assertEmailOnly(where) {
+    const foreign = requestedHosts.filter(h => h !== 'api.hostaway.com');
+    assert.deepStrictEqual(foreign, [], `${where}: contacted a host other than Hostaway: ${foreign.join(', ')}`);
+    const messaging = requestedHosts.filter(h => MESSAGING_HOSTS.test(h));
+    assert.deepStrictEqual(messaging, [], `${where}: contacted a messaging host: ${messaging.join(', ')}`);
+
+    assert.strictEqual(transportConfigs.length, 1, `${where}: expected exactly one mail transport`);
+    const cfg = transportConfigs[0];
+    assert.ok(cfg.host && cfg.auth, `${where}: the transport is not an SMTP config`);
+    const cfgText = JSON.stringify(cfg);
+    assert.ok(!MESSAGING_HOSTS.test(cfgText), `${where}: transport config references a messaging provider`);
+  }
+
+  await test('normal report: delivery is email only, no WhatsApp/Twilio path reached', async () => {
+    const { normal, alerts } = await runMain(healthyPlan({ listingCount: 3, reservationsPerListing: 2 }));
+    assert.strictEqual(normal.length, 1, 'the report goes out by email');
+    assert.strictEqual(alerts.length, 0, 'no alert on a healthy run');
+    assertEmailOnly('normal report');
+  });
+
+  await test('failure alert: delivery is email only, no WhatsApp/Twilio path reached', async () => {
+    const { normal, alerts } = await runMain(financeDownPlan());
+    assert.strictEqual(normal.length, 0, 'no normal report on failure');
+    assert.strictEqual(alerts.length, 1, 'the alert goes out by email');
+    assertEmailOnly('failure alert');
+  });
+
+  await test('the active report system contains no Twilio/WhatsApp code or dependency', async () => {
+    const root = __dirname;
+    // Every delivery-capable file in the repo, plus every workflow. This test file is
+    // excluded because it necessarily names the terms it is forbidding.
+    const scanned = fs.readdirSync(root)
+      .filter(f => f.endsWith('.js') && f !== 'test-fetch-failures.js')
+      .concat(
+        fs.readdirSync(path.join(root, '.github', 'workflows'))
+          .map(f => path.join('.github', 'workflows', f))
+      );
+    assert.ok(scanned.length >= 6, `expected to scan the report scripts and workflows, saw ${scanned.length}`);
+
+    for (const rel of scanned) {
+      const text = fs.readFileSync(path.join(root, rel), 'utf8');
+      assert.ok(
+        !/twilio|whatsapp|graph\.facebook|wa\.me/i.test(text),
+        `${rel} still references a WhatsApp/Twilio path`
+      );
+      assert.ok(
+        !/TWILIO_[A-Z_]+|WHATSAPP_[A-Z_]+/.test(text),
+        `${rel} still references a Twilio/WhatsApp environment variable`
+      );
+    }
+
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    const deps = Object.keys({ ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) });
+    assert.ok(!deps.some(d => /twilio|whatsapp/i.test(d)), `a messaging dependency is still installed: ${deps.join(', ')}`);
   });
 
   // --- the alert that reaches recipients ---------------------------------------

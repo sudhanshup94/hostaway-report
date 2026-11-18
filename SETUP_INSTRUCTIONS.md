@@ -31,10 +31,8 @@ For Gmail SMTP with an [App Password](https://support.google.com/accounts/answer
 Make sure these secrets exist in GitHub:
 - ✅ `HOSTAWAY_ACCOUNT_ID` → 52447
 - ✅ `HOSTAWAY_API_KEY` → Your API key
-- ✅ `TWILIO_ACCOUNT_SID` → Your Twilio account SID
-- ✅ `TWILIO_AUTH_TOKEN` → Your Twilio auth token
-- ✅ `TWILIO_PHONE_NUMBER` → Your Twilio phone number
-- ✅ `WHATSAPP_RECIPIENT` → WhatsApp recipient number
+
+The report is delivered by email only. No messaging credentials are needed.
 
 ## How to Generate Gmail App Password
 
